@@ -27,6 +27,7 @@ EXPECTED_TABLES = {
     "risk_sessions",
     "risk_state_events",
     "risk_governor_state",
+    "risk_instrument_marks",
 }
 
 

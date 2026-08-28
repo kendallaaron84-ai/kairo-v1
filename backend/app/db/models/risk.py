@@ -108,3 +108,29 @@ class RiskGovernorState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class RiskInstrumentMark(Base):
+    __tablename__ = "risk_instrument_marks"
+    __table_args__ = (
+        CheckConstraint("mark_price > 0", name="positive_mark_price"),
+        CheckConstraint(
+            "received_at >= source_timestamp", name="valid_mark_provenance"
+        ),
+        Index("ix_risk_instrument_marks_session_received", "session_id", "received_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("risk_sessions.session_id"), primary_key=True
+    )
+    instrument_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("instruments.instrument_id"), primary_key=True
+    )
+    mark_price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    source_timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

@@ -1,6 +1,8 @@
 from decimal import Decimal
 
-from engine.risk.models import FillAccountingEvent, MarketMark, PnLSnapshot, PositionSnapshot
+from uuid import UUID
+
+from engine.risk.models import FillAccountingEvent, PnLSnapshot, PositionSnapshot
 
 
 def net_pnl(
@@ -24,16 +26,23 @@ def apply_fill(snapshot: PnLSnapshot, event: FillAccountingEvent) -> PnLSnapshot
 
 def mark_to_market(
     snapshot: PnLSnapshot,
-    mark: MarketMark,
+    latest_marks: dict[UUID, Decimal],
     positions: list[PositionSnapshot],
 ) -> PnLSnapshot:
-    marked = [position for position in positions if position.instrument_id == mark.instrument_id]
+    missing = {
+        position.instrument_id
+        for position in positions
+        if position.quantity != 0 and position.instrument_id not in latest_marks
+    }
+    if missing:
+        raise ValueError(f"portfolio marks missing for instruments: {sorted(map(str, missing))}")
     unrealized = sum(
         (
             position.quantity
-            * (mark.mark_price - position.average_price)
+            * (latest_marks[position.instrument_id] - position.average_price)
             * position.contract_multiplier
-            for position in marked
+            for position in positions
+            if position.quantity != 0
         ),
         start=Decimal("0"),
     )

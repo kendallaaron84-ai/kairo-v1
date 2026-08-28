@@ -749,3 +749,103 @@ def test_hard_halt_supersedes_ordinary_exit_purposes(
         make_request(db_session, context, purpose=purpose, side="SELL")
     )
     assert result.reason is DisqualificationReason.SYSTEM_HALTED
+
+
+def record_portfolio_mark(
+    governor: RiskGovernor,
+    context: SeededContext,
+    price: str,
+    positions: list[PositionSnapshot],
+) -> tuple[object, ...]:
+    now = datetime.now(UTC)
+    return governor.record_market_mark(
+        MarketMark(
+            instrument_id=context.instrument.instrument_id,
+            mark_price=Decimal(price),
+            source_timestamp=now,
+            received_at=now,
+        ),
+        positions=positions,
+        authorized_cash_usd=Decimal("1000"),
+    )
+
+
+def test_multi_instrument_marks_preserve_other_instrument_unrealized_pnl(
+    db_session: Session,
+) -> None:
+    first = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(db_session, position_quantity=Decimal("1"))
+    positions = [position_snapshot(first), position_snapshot(second)]
+    governor = initialize_governor(db_session)
+
+    record_portfolio_mark(governor, first, "12", positions)
+    record_portfolio_mark(governor, second, "5", positions)
+
+    assert governor.current_state().session_unrealized_pnl == Decimal("-3")
+
+
+def test_session_net_pnl_aggregates_all_open_positions(db_session: Session) -> None:
+    first = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(db_session, position_quantity=Decimal("1"))
+    positions = [position_snapshot(first), position_snapshot(second)]
+    governor = initialize_governor(db_session)
+    governor.record_fill_accounting(
+        accounting_event("10", fees="1", slippage="1"),
+        authorized_cash_usd=Decimal("1000"),
+    )
+
+    record_portfolio_mark(governor, first, "12", positions)
+    record_portfolio_mark(governor, second, "5", positions)
+
+    state = governor.current_state()
+    assert state.session_unrealized_pnl == Decimal("-3")
+    assert state.session_net_pnl == Decimal("5")
+
+
+def test_aggregate_unrealized_loss_triggers_hard_halt(db_session: Session) -> None:
+    first = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(db_session, position_quantity=Decimal("1"))
+    positions = [position_snapshot(first), position_snapshot(second)]
+    governor = initialize_governor(db_session)
+
+    record_portfolio_mark(governor, first, "8", positions)
+    commands = record_portfolio_mark(governor, second, "6", positions)
+
+    assert governor.current_state().session_unrealized_pnl == Decimal("-6")
+    assert governor.current_state().operational_state == OperationalState.HALTED_HARD.value
+    assert len(
+        [command for command in commands if isinstance(command, EmergencyExitCommand)]
+    ) == 2
+
+
+def test_new_mark_for_one_instrument_does_not_erase_other_positions(
+    db_session: Session,
+) -> None:
+    first = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(db_session, position_quantity=Decimal("1"))
+    positions = [position_snapshot(first), position_snapshot(second)]
+    governor = initialize_governor(db_session)
+    record_portfolio_mark(governor, first, "12", positions)
+    record_portfolio_mark(governor, second, "5", positions)
+
+    record_portfolio_mark(governor, first, "13", positions)
+
+    assert governor.current_state().session_unrealized_pnl == Decimal("-2")
+
+
+def test_persisted_portfolio_marks_survive_governor_restart(
+    db_session: Session,
+) -> None:
+    first = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(db_session, position_quantity=Decimal("1"))
+    positions = [position_snapshot(first), position_snapshot(second)]
+    governor = initialize_governor(db_session)
+    record_portfolio_mark(governor, first, "12", positions)
+    record_portfolio_mark(governor, second, "5", positions)
+    db_session.flush()
+    db_session.expire_all()
+
+    restarted = RiskGovernor(db_session)
+    record_portfolio_mark(restarted, first, "13", positions)
+
+    assert restarted.current_state().session_unrealized_pnl == Decimal("-2")

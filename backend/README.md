@@ -30,3 +30,7 @@ each session disarmed, classifies projected exposure rather than trusting intent
 the frozen loss/profit/market-data/capability/capital gates, and emits deterministic cancellation
 and emergency-exit requests. Those requests are commands only; this phase does not claim broker
 submission, acknowledgement, execution, or fills. Phase 2C remains explicitly out of scope.
+
+Migration `0004` persists each session's latest mark per instrument. Every mark update reloads
+the canonical open-position portfolio and recomputes aggregate unrealized P&L across all
+instruments, preventing one instrument's update from erasing every other position's contribution.

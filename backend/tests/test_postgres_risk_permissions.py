@@ -101,6 +101,19 @@ def test_runtime_role_preserves_risk_event_immutability_and_projection_control(
                     "'kairo_runtime', 'risk_decisions', 'UPDATE')"
                 )
             ) is False
+            assert connection.scalar(
+                text(
+                    "SELECT has_table_privilege("
+                    "'kairo_runtime', 'risk_instrument_marks', "
+                    "'SELECT,INSERT,UPDATE')"
+                )
+            ) is True
+            assert connection.scalar(
+                text(
+                    "SELECT has_table_privilege("
+                    "'kairo_runtime', 'risk_instrument_marks', 'DELETE')"
+                )
+            ) is False
     finally:
         with admin_engine.begin() as connection:
             connection.execute(text("DELETE FROM risk_governor_state WHERE singleton_key=1"))

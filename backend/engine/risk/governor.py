@@ -9,7 +9,7 @@ from app.db.models.broker import BrokerInstrumentCapability
 from app.db.models.configuration import Instrument, StrategyRegistry
 from app.db.models.ledger import KairoCapitalAuthorizationRecord, OrderIntent, RiskDecision
 from app.db.models.projections import CapitalCell, CurrentPosition
-from app.db.models.risk import RiskGovernorState, RiskStateEvent
+from app.db.models.risk import RiskGovernorState, RiskInstrumentMark, RiskStateEvent
 from app.domain.enums import OrderPurpose, OrderSide
 from engine.risk.commands import (
     CancelOrderCommand,
@@ -325,14 +325,72 @@ class RiskGovernor:
         if mark.quote_age() is None:
             raise RiskGovernorError("market mark has an invalid/future timestamp")
         state = self.state_machine.lock_state()
-        updated = mark_to_market(self.state_machine.pnl_snapshot(state), mark, positions)
+        persisted = self.session.get(
+            RiskInstrumentMark, (state.current_session_id, mark.instrument_id)
+        )
+        if persisted is None:
+            persisted = RiskInstrumentMark(
+                session_id=state.current_session_id,
+                instrument_id=mark.instrument_id,
+                mark_price=mark.mark_price,
+                source_timestamp=mark.source_timestamp,
+                received_at=mark.received_at,
+            )
+            self.session.add(persisted)
+        elif mark.source_timestamp >= persisted.source_timestamp:
+            persisted.mark_price = mark.mark_price
+            persisted.source_timestamp = mark.source_timestamp
+            persisted.received_at = mark.received_at
+        self.session.flush()
+
+        canonical_positions = self._canonical_open_positions()
+        persisted_marks = self.session.scalars(
+            select(RiskInstrumentMark).where(
+                RiskInstrumentMark.session_id == state.current_session_id
+            ).with_for_update()
+        )
+        latest_marks = {
+            persisted_mark.instrument_id: persisted_mark.mark_price
+            for persisted_mark in persisted_marks
+        }
+        required_instruments = {
+            position.instrument_id for position in canonical_positions
+        }
+        if not required_instruments.issubset(latest_marks):
+            # Persist the new fact, but retain the last complete portfolio P&L until
+            # every open instrument has an observed mark. Never fabricate a quote or
+            # replace the aggregate with an incomplete subset.
+            return ()
+        updated = mark_to_market(
+            self.state_machine.pnl_snapshot(state), latest_marks, canonical_positions
+        )
         self.state_machine.persist_pnl(state, updated)
         return self._apply_pnl_boundary(
             state,
             authorized_cash_usd,
-            positions,
+            canonical_positions,
             pending_orders or [],
         )
+
+    def _canonical_open_positions(self) -> list[PositionSnapshot]:
+        rows = self.session.execute(
+            select(CurrentPosition, Instrument)
+            .join(Instrument, Instrument.instrument_id == CurrentPosition.instrument_id)
+            .where(CurrentPosition.quantity != 0)
+            .with_for_update(of=CurrentPosition)
+        ).all()
+        return [
+            PositionSnapshot(
+                position_id=position.position_id,
+                cell_id=position.cell_id,
+                broker_account_id=position.broker_account_id,
+                instrument_id=position.instrument_id,
+                quantity=position.quantity,
+                average_price=position.average_price,
+                contract_multiplier=instrument.contract_multiplier or Decimal("1"),
+            )
+            for position, instrument in rows
+        ]
 
     def _evaluate_reason(
         self,

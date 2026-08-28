@@ -14,7 +14,12 @@ from app.db.models.ledger import (
     TrustEvaluation,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
-from app.db.models.risk import RiskGovernorState, RiskSession, RiskStateEvent
+from app.db.models.risk import (
+    RiskGovernorState,
+    RiskInstrumentMark,
+    RiskSession,
+    RiskStateEvent,
+)
 
 __all__ = [
     "BrokerAccount",
@@ -33,6 +38,7 @@ __all__ = [
     "OwnershipTreasuryHolding",
     "RiskDecision",
     "RiskGovernorState",
+    "RiskInstrumentMark",
     "RiskSession",
     "RiskStateEvent",
     "SiphonEvent",
