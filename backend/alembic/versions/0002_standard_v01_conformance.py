@@ -22,54 +22,6 @@ UUID = postgresql.UUID(as_uuid=True)
 
 
 def upgrade() -> None:
-    for table, old_name, new_name in (
-        (
-            "siphon_events",
-            "ck_siphon_events_ck_siphon_events_positive_amount",
-            "ck_siphon_events_positive_amount",
-        ),
-        ("fills", "ck_fills_ck_fills_positive_quantity", "ck_fills_positive_quantity"),
-        ("fills", "ck_fills_ck_fills_positive_price", "ck_fills_positive_price"),
-        (
-            "broker_cash_snapshots",
-            "ck_broker_cash_snapshots_ck_broker_cash_snapshots_settled_nonnegative",
-            "ck_broker_cash_snapshots_settled_nonnegative",
-        ),
-        (
-            "broker_cash_snapshots",
-            "ck_broker_cash_snapshots_ck_broker_cash_snapshots_buying_power_nonnegative",
-            "ck_broker_cash_snapshots_buying_power_nonnegative",
-        ),
-        (
-            "kairo_capital_authorizations",
-            "ck_kairo_capital_authorizations_ck_kairo_capital_authorizations_nonnegative",
-            "ck_kairo_capital_authorizations_nonnegative",
-        ),
-        (
-            "capital_cells",
-            "ck_capital_cells_ck_capital_cells_seed_nonnegative",
-            "ck_capital_cells_seed_nonnegative",
-        ),
-        (
-            "ownership_treasury_holdings",
-            "ck_ownership_treasury_holdings_ck_treasury_holdings_dollars_nonnegative",
-            "ck_ownership_treasury_holdings_dollars_nonnegative",
-        ),
-        (
-            "ownership_treasury_holdings",
-            "ck_ownership_treasury_holdings_ck_treasury_holdings_shares_nonnegative",
-            "ck_ownership_treasury_holdings_shares_nonnegative",
-        ),
-        (
-            "current_positions",
-            "ck_current_positions_ck_current_positions_price_nonnegative",
-            "ck_current_positions_price_nonnegative",
-        ),
-    ):
-        op.execute(
-            f'ALTER TABLE "{table}" RENAME CONSTRAINT "{old_name}" TO "{new_name}"'
-        )
-
     for column in (
         sa.Column("underlying_symbol", sa.String(32)),
         sa.Column("contract_symbol", sa.String(64)),
@@ -114,7 +66,9 @@ def upgrade() -> None:
     )
     op.alter_column("order_intents", "order_purpose", nullable=False)
     op.drop_constraint(
-        "ck_order_intents_positive_quantity", "order_intents", type_="check"
+        op.f("ck_order_intents_positive_quantity"),
+        "order_intents",
+        type_="check",
     )
     op.drop_column("order_intents", "quantity")
     op.create_check_constraint(
@@ -347,7 +301,9 @@ def downgrade() -> None:
     op.drop_column("order_intents", "target_notional_usd")
     op.drop_column("order_intents", "order_purpose")
     op.create_check_constraint(
-        "ck_order_intents_positive_quantity", "order_intents", "quantity > 0"
+        op.f("ck_order_intents_positive_quantity"),
+        "order_intents",
+        "quantity > 0",
     )
 
     for name in (
@@ -373,52 +329,3 @@ def downgrade() -> None:
         "underlying_symbol",
     ):
         op.drop_column("instruments", name)
-
-    for table, normalized_name, original_name in (
-        (
-            "siphon_events",
-            "ck_siphon_events_positive_amount",
-            "ck_siphon_events_ck_siphon_events_positive_amount",
-        ),
-        ("fills", "ck_fills_positive_quantity", "ck_fills_ck_fills_positive_quantity"),
-        ("fills", "ck_fills_positive_price", "ck_fills_ck_fills_positive_price"),
-        (
-            "broker_cash_snapshots",
-            "ck_broker_cash_snapshots_settled_nonnegative",
-            "ck_broker_cash_snapshots_ck_broker_cash_snapshots_settled_nonnegative",
-        ),
-        (
-            "broker_cash_snapshots",
-            "ck_broker_cash_snapshots_buying_power_nonnegative",
-            "ck_broker_cash_snapshots_ck_broker_cash_snapshots_buying_power_nonnegative",
-        ),
-        (
-            "kairo_capital_authorizations",
-            "ck_kairo_capital_authorizations_nonnegative",
-            "ck_kairo_capital_authorizations_ck_kairo_capital_authorizations_nonnegative",
-        ),
-        (
-            "capital_cells",
-            "ck_capital_cells_seed_nonnegative",
-            "ck_capital_cells_ck_capital_cells_seed_nonnegative",
-        ),
-        (
-            "ownership_treasury_holdings",
-            "ck_ownership_treasury_holdings_dollars_nonnegative",
-            "ck_ownership_treasury_holdings_ck_treasury_holdings_dollars_nonnegative",
-        ),
-        (
-            "ownership_treasury_holdings",
-            "ck_ownership_treasury_holdings_shares_nonnegative",
-            "ck_ownership_treasury_holdings_ck_treasury_holdings_shares_nonnegative",
-        ),
-        (
-            "current_positions",
-            "ck_current_positions_price_nonnegative",
-            "ck_current_positions_ck_current_positions_price_nonnegative",
-        ),
-    ):
-        op.execute(
-            f'ALTER TABLE "{table}" RENAME CONSTRAINT "{normalized_name}" '
-            f'TO "{original_name}"'
-        )
