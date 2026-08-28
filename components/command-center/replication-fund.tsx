@@ -1,0 +1,4 @@
+import { CopyPlus } from 'lucide-react';
+import type { CapitalBuilderSnapshot } from '@/lib/domain';
+import { Panel, StatusBadge } from '@/components/ui';
+export function ReplicationFund({data}:{data:CapitalBuilderSnapshot}){const progress=data.replicationFund/data.replicationGoal*100;return <Panel title="Replication Fund" subtitle="Qualified surplus for a future governed cell" action={<StatusBadge tone="warning">ACCUMULATING</StatusBadge>}><div className="replication-body"><span className="replication-icon"><CopyPlus size={18}/></span><div className="replication-values"><span>Current<strong>${data.replicationFund.toFixed(2)}</strong></span><span>Replication Goal<strong>${data.replicationGoal.toFixed(2)}</strong></span></div><div className="progress"><i style={{width:`${progress}%`}}/></div><p><b>{progress.toFixed(1)}%</b> · Reaching $100 creates Replication Eligible status; cell creation still requires governance approval.</p></div></Panel>}

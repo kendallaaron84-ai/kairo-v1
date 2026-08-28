@@ -1,0 +1,11 @@
+import { CapitalBuckets } from '@/components/command-center/capital-buckets';
+import { GuardrailsWidget } from '@/components/command-center/guardrails-widget';
+import { TelemetryCards } from '@/components/command-center/telemetry-cards';
+import { TreasuryProgress } from '@/components/command-center/treasury-progress';
+import { capitalCells, capitalSnapshot, governance, milestones, riskState, systemHealth, treasuries } from '@/data/mock-data';
+import { StatusBadge } from '@/components/ui';
+import { AutonomyCard } from '@/components/governance/autonomy-card';
+import { MilestoneLadder } from '@/components/governance/milestone-ladder';
+import { SystemHealth } from '@/components/system/system-health';
+import { ReplicationFund } from '@/components/command-center/replication-fund';
+export function CommandCenterScreen(){const cell=capitalCells[0];return <><div className="hero-row"><div><p className="section-kicker">AUTONOMOUS CAPITAL BUILDER · GOVERNANCE STANDARD V0.1</p><h2>$100 cell operating inside governed boundaries</h2><p className="muted">Capital growth, safety reserves, ownership, and replication remain purpose-separated.</p></div><StatusBadge tone="good">PAPER SYSTEM HEALTHY</StatusBadge></div><AutonomyCard governance={governance}/><TelemetryCards data={capitalSnapshot}/><div className="capital-primary"><GuardrailsWidget risk={riskState}/><article className="panel cell-card"><div className="panel-head"><div><p className="panel-title">{cell.id}</p><span>Canonical Capital Cell</span></div><StatusBadge tone="warning">{cell.status}</StatusBadge></div><div className="cell-body"><dl><dt>Seed Capital</dt><dd>${cell.seedCapital.toFixed(2)}</dd><dt>Strategy</dt><dd>{cell.strategyId}</dd><dt>Target Treasury</dt><dd>{cell.targetTreasuryId}</dd><dt>Capital Scale</dt><dd><StatusBadge tone="danger">{governance.capitalScale}</StatusBadge></dd></dl><p><span>MISSION</span>{cell.mission}</p></div></article></div><div className="capital-secondary"><CapitalBuckets data={capitalSnapshot}/><TreasuryProgress treasuries={treasuries}/></div><ReplicationFund data={capitalSnapshot}/><div className="command-governance"><MilestoneLadder milestones={milestones} governance={governance}/><SystemHealth system={systemHealth}/></div></>}

@@ -1,0 +1,4 @@
+import { MetricCard } from '@/components/ui';
+import type { CapitalBuilderSnapshot } from '@/lib/domain';
+const usd=(value:number,signed=false)=>`${signed&&value>=0?'+':''}$${Math.abs(value).toFixed(2)}`;
+export function TelemetryCards({data}:{data:CapitalBuilderSnapshot}){return <div className="capital-telemetry"><MetricCard label="Seed Reference" value={usd(data.seedReference)} detail="Productive capital reference" tone="ai"/><MetricCard label="Today's Net P&L" value={usd(data.todayNetPnl,true)} detail="Valid outcome range includes $0.00" tone="good"/><MetricCard label="Safety Reserve" value={usd(data.safetyReserve)} detail="Unavailable to trading engine" tone="good"/><MetricCard label="Ownership Treasuries" value={usd(data.ownershipTreasuries)} detail="Long-term ownership capital" tone="ai"/><MetricCard label="Replication Fund" value={usd(data.replicationFund)} detail="Qualified surplus only" tone="warning"/></div>}

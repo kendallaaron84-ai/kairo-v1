@@ -1,0 +1,5 @@
+import { BrainCircuit, Eye, Hand, Shield } from 'lucide-react';
+import type { AutonomyAuthority } from '@/lib/domain';
+import { Panel, StatusBadge } from '@/components/ui';
+const authority:Record<AutonomyAuthority,{icon:typeof Eye;description:string}>={OBSERVE:{icon:Eye,description:'May inspect evidence only'},ADVISE:{icon:BrainCircuit,description:'May produce contextual recommendations'},VETO_ONLY:{icon:Shield,description:'May block but never authorize'},SELECT_STRATEGY:{icon:Hand,description:'May select from pre-cleared strategies'}};
+export function AgentStatus({active}:{active:AutonomyAuthority}){return <Panel title="AI authority states" subtitle="Explicit, independently governed"><div className="authority-list">{(Object.keys(authority) as AutonomyAuthority[]).map(key=>{const item=authority[key],Icon=item.icon,isActive=key===active;return <div className={isActive?'active':''} key={key}><span><Icon size={14}/></span><div><strong>{key}</strong><small>{item.description}</small></div>{isActive&&<StatusBadge tone="ai">ACTIVE</StatusBadge>}</div>})}</div></Panel>}

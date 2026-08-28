@@ -1,0 +1,3 @@
+import { Panel, StatusBadge } from '@/components/ui';
+import type { GovernanceState } from '@/lib/domain';
+export function GovernanceMatrix({state}:{state:GovernanceState}){return <Panel title="Governance matrix" subtitle="Independent permissions"><div className="governance-matrix"><div><span>Agent authority</span><b>Level {state.autonomyLevel}</b><StatusBadge tone="warning">{state.autonomyLabel}</StatusBadge></div><div><span>Capital authority</span><b>${state.authorizedCapital.toFixed(2)}</b><StatusBadge tone="danger">SCALE {state.capitalScale}</StatusBadge></div><div><span>Strategy authority</span><b>{state.strategyId}</b><StatusBadge tone="ai">{state.strategyClearance}</StatusBadge></div></div></Panel>}

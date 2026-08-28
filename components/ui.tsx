@@ -1,5 +1,8 @@
 import { ReactNode } from 'react';
+import type { Section } from '@/lib/navigation';
+import { sectionConfig } from '@/lib/navigation';
 export function StatusBadge({children,tone='neutral'}:{children:ReactNode;tone?:'good'|'danger'|'warning'|'ai'|'neutral'}){return <span className={`badge badge-${tone}`}><i/>{children}</span>}
 export function Panel({title,subtitle,action,children,className=''}:{title:string;subtitle?:string;action?:ReactNode;children:ReactNode;className?:string}){return <article className={`panel ${className}`}><div className="panel-head"><div><p className="panel-title">{title}</p>{subtitle&&<span>{subtitle}</span>}</div>{action}</div>{children}</article>}
 export function MetricCard({label,value,detail,tone='neutral'}:{label:string;value:string;detail:string;tone?:'good'|'warning'|'danger'|'ai'|'neutral'}){return <article className="metric-card"><div className="metric-head"><span>{label}</span><span className={`metric-dot ${tone}`}/></div><strong>{value}</strong><small className={tone}>{detail}</small></article>}
 export function DataTable({headers,rows,compact=false}:{headers:string[];rows:ReactNode[][];compact?:boolean}){return <div className="table-wrap"><table className={`data-table ${compact?'compact':''}`}><thead><tr>{headers.map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{cell}</td>)}</tr>)}</tbody></table></div>}
+export function PageIntro({section,title,description,aside}:{section:Section;title:string;description:string;aside?:ReactNode}){return <div className="hero-row"><div><p className="section-kicker">{sectionConfig[section].eyebrow}</p><h2>{title}</h2><p className="muted">{description}</p></div>{aside}</div>}
