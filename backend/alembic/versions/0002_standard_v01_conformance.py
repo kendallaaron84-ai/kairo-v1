@@ -65,11 +65,6 @@ def upgrade() -> None:
         "UPDATE order_intents SET order_purpose = 'ENTRY', target_quantity = quantity"
     )
     op.alter_column("order_intents", "order_purpose", nullable=False)
-    op.drop_constraint(
-        op.f("ck_order_intents_positive_quantity"),
-        "order_intents",
-        type_="check",
-    )
     op.drop_column("order_intents", "quantity")
     op.create_check_constraint(
         op.f("ck_order_intents_single_sizing_mode"),
