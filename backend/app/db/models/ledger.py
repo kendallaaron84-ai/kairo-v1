@@ -45,7 +45,7 @@ class MarketSnapshot(Base):
 class SiphonEvent(Base):
     __tablename__ = "siphon_events"
     __table_args__ = (
-        CheckConstraint("amount > 0", name="positive_amount"),
+        CheckConstraint("amount > 0", name="ck_siphon_events_positive_amount"),
         Index("ix_siphon_events_cell_occurred", "cell_id", "occurred_at"),
     )
     siphon_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -122,8 +122,14 @@ class RiskDecision(Base):
 
 class KairoOrder(Base):
     __tablename__ = "kairo_orders"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_kairo_orders_intent_id"),
+        Index("ix_kairo_orders_intent_id", "intent_id"),
+    )
     kairo_order_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    intent_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("order_intents.intent_id"), nullable=False, unique=True, index=True)
+    intent_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("order_intents.intent_id"), nullable=False
+    )
     broker_account_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("broker_accounts.broker_account_id"), nullable=False)
     broker_order_id: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -150,8 +156,8 @@ class OrderObservation(Base):
 class Fill(Base):
     __tablename__ = "fills"
     __table_args__ = (
-        CheckConstraint("quantity > 0", name="positive_quantity"),
-        CheckConstraint("price > 0", name="positive_price"),
+        CheckConstraint("quantity > 0", name="ck_fills_positive_quantity"),
+        CheckConstraint("price > 0", name="ck_fills_positive_price"),
         UniqueConstraint("broker_account_id", "broker_fill_id", name="uq_fills_broker_fill"),
         Index("ix_fills_kairo_order_filled", "kairo_order_id", "filled_at"),
         Index("ix_fills_broker_account_filled", "broker_account_id", "filled_at"),
@@ -174,13 +180,13 @@ class BrokerCashSnapshot(Base):
             "broker_cash >= 0", name="broker_cash_nonnegative"
         ),
         CheckConstraint(
-            "settled_cash >= 0", name="settled_nonnegative"
+            "settled_cash >= 0", name="ck_broker_cash_snapshots_settled_nonnegative"
         ),
         CheckConstraint(
             "unsettled_cash >= 0", name="unsettled_nonnegative"
         ),
         CheckConstraint(
-            "buying_power >= 0", name="buying_power_nonnegative"
+            "buying_power >= 0", name="ck_broker_cash_snapshots_buying_power_nonnegative"
         ),
         UniqueConstraint("broker_account_id", "captured_at", name="uq_broker_cash_snapshot_time"),
         UniqueConstraint("snapshot_id", "broker_account_id", name="uq_broker_cash_snapshot_account"),
@@ -203,7 +209,7 @@ class KairoCapitalAuthorizationRecord(Base):
             "settled_cash >= 0 AND safety_reserve >= 0 "
             "AND ownership_treasury_reserved >= 0 AND replication_reserve >= 0 "
             "AND committed_obligations >= 0 AND authorized_trading_cash >= 0",
-            name="nonnegative",
+            name="ck_kairo_capital_authorizations_nonnegative",
         ),
         ForeignKeyConstraint(
             ["broker_snapshot_id", "broker_account_id"],

@@ -26,7 +26,9 @@ class CapitalCell(Base):
             ["strategy_registry.strategy_id", "strategy_registry.version_tag"],
             name="fk_capital_cells_strategy_version",
         ),
-        CheckConstraint("seed_capital >= 0", name="seed_nonnegative"),
+        CheckConstraint(
+            "seed_capital >= 0", name="ck_capital_cells_seed_nonnegative"
+        ),
     )
     cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     cell_code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
@@ -42,10 +44,10 @@ class OwnershipTreasuryHolding(Base):
     __tablename__ = "ownership_treasury_holdings"
     __table_args__ = (
         CheckConstraint(
-            "dollars_contributed >= 0", name="dollars_nonnegative"
+            "dollars_contributed >= 0", name="ck_treasury_holdings_dollars_nonnegative"
         ),
         CheckConstraint(
-            "fractional_shares >= 0", name="shares_nonnegative"
+            "fractional_shares >= 0", name="ck_treasury_holdings_shares_nonnegative"
         ),
         UniqueConstraint("treasury_code", "instrument_id", name="uq_treasury_holding_instrument"),
     )
@@ -61,7 +63,7 @@ class CurrentPosition(Base):
     __tablename__ = "current_positions"
     __table_args__ = (
         CheckConstraint(
-            "average_price >= 0", name="price_nonnegative"
+            "average_price >= 0", name="ck_current_positions_price_nonnegative"
         ),
         UniqueConstraint(
             "cell_id", "broker_account_id", "instrument_id",

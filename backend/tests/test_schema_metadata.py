@@ -48,10 +48,13 @@ def test_order_intent_lineage_and_idempotency_are_declared() -> None:
 
 def test_economic_amount_checks_are_declared_in_models() -> None:
     expected = {
-        "siphon_events": {"ck_siphon_events_positive_amount"},
+        "siphon_events": {"ck_siphon_events_ck_siphon_events_positive_amount"},
         "order_intents": {"ck_order_intents_positive_quantity"},
-        "fills": {"ck_fills_positive_quantity", "ck_fills_positive_price"},
-        "capital_cells": {"ck_capital_cells_seed_nonnegative"},
+        "fills": {
+            "ck_fills_ck_fills_positive_quantity",
+            "ck_fills_ck_fills_positive_price",
+        },
+        "capital_cells": {"ck_capital_cells_ck_capital_cells_seed_nonnegative"},
     }
     for table_name, constraint_names in expected.items():
         actual = {
