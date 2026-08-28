@@ -24,6 +24,9 @@ EXPECTED_TABLES = {
     "capital_cells",
     "ownership_treasury_holdings",
     "current_positions",
+    "risk_sessions",
+    "risk_state_events",
+    "risk_governor_state",
 }
 
 

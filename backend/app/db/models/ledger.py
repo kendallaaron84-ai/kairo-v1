@@ -112,10 +112,23 @@ class OrderIntent(Base):
 
 class RiskDecision(Base):
     __tablename__ = "risk_decisions"
+    __table_args__ = (
+        Index("ix_risk_decisions_session_decided", "session_id", "decided_at"),
+    )
     decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     intent_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("order_intents.intent_id"), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("risk_sessions.session_id"), nullable=False
+    )
     verdict: Mapped[str] = mapped_column(String(32), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    operational_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    intent_classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_net_pnl: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    authorized_cash_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    requested_cash_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    projected_exposure_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    max_contractual_loss_usd: Mapped[Decimal | None] = mapped_column(Numeric(28, 10))
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 

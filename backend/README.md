@@ -1,6 +1,6 @@
-# Kairo Phase 2A — Persistence Motor
+# Kairo Phase 2B — Deterministic Risk Governor
 
-Backend-only implementation of the frozen Kairo Ledger & Execution Domain Standard v0.1.
+Backend-only implementation of the Kairo persistence motor and deterministic risk governor.
 It contains no broker adapters, trading execution, live feeds, AI agents, or strategy runtime.
 
 ## Local PostgreSQL stack
@@ -22,4 +22,11 @@ access to immutable ledger facts and controlled update access to configuration a
 Migration `0002` is the final Standard v0.1 conformance patch. It restores canonical option
 identity, broker execution capabilities, intent purpose and sizing semantics, broker cash and
 capital-authorization provenance, zero-evidence trust metadata, and capital-cell ownership of
-current positions. Phase 2B remains explicitly out of scope.
+current positions.
+
+Migration `0003` adds explicit market sessions, an immutable risk-state event ledger, the
+singleton restart-safe governor projection, and complete decision evidence. The governor starts
+each session disarmed, classifies projected exposure rather than trusting intent labels, enforces
+the frozen loss/profit/market-data/capability/capital gates, and emits deterministic cancellation
+and emergency-exit requests. Those requests are commands only; this phase does not claim broker
+submission, acknowledgement, execution, or fills. Phase 2C remains explicitly out of scope.
