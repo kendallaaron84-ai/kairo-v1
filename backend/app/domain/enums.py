@@ -24,6 +24,19 @@ class OrderType(StrEnum):
     STOP = "STOP"
 
 
+class OrderPurpose(StrEnum):
+    ENTRY = "ENTRY"
+    TAKE_PROFIT = "TAKE_PROFIT"
+    STOP_LOSS = "STOP_LOSS"
+    EMERGENCY_EXIT = "EMERGENCY_EXIT"
+    TREASURY_PURCHASE = "TREASURY_PURCHASE"
+
+
+class OptionRight(StrEnum):
+    CALL = "CALL"
+    PUT = "PUT"
+
+
 class RiskVerdict(StrEnum):
     AUTHORIZED = "AUTHORIZED"
     BLOCKED = "BLOCKED"

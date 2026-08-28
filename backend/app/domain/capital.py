@@ -15,6 +15,8 @@ class KairoCapitalAuthorization(BaseModel):
 
     authorization_id: UUID = Field(default_factory=uuid4)
     cell_id: UUID
+    broker_snapshot_id: UUID
+    broker_account_id: UUID
     settled_cash: Decimal
     safety_reserve: Decimal
     ownership_treasury_reserved: Decimal
@@ -42,6 +44,8 @@ class KairoCapitalAuthorization(BaseModel):
         cls,
         *,
         cell_id: UUID,
+        broker_snapshot_id: UUID,
+        broker_account_id: UUID,
         settled_cash: Decimal,
         safety_reserve: Decimal = Decimal("0"),
         ownership_treasury_reserved: Decimal = Decimal("0"),
@@ -69,6 +73,8 @@ class KairoCapitalAuthorization(BaseModel):
         return cls(
             authorization_id=uuid4(),
             cell_id=cell_id,
+            broker_snapshot_id=broker_snapshot_id,
+            broker_account_id=broker_account_id,
             settled_cash=settled_cash,
             safety_reserve=safety_reserve,
             ownership_treasury_reserved=ownership_treasury_reserved,
@@ -84,7 +90,9 @@ class BrokerCashSnapshotFact(BaseModel):
 
     snapshot_id: UUID = Field(default_factory=uuid4)
     broker_account_id: UUID
+    broker_cash: Decimal = Field(ge=0)
     settled_cash: Decimal = Field(ge=0)
+    unsettled_cash: Decimal = Field(ge=0)
     buying_power: Decimal = Field(ge=0)
     currency: str = "USD"
     captured_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

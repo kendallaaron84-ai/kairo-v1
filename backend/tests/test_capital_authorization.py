@@ -21,8 +21,12 @@ def test_compute_authorized_trading_cash(
     settled: str, safety: str, ownership: str, replication: str,
     committed: str, expected: str,
 ) -> None:
+    broker_snapshot_id = uuid4()
+    broker_account_id = uuid4()
     authorization = KairoCapitalAuthorization.compute(
         cell_id=uuid4(),
+        broker_snapshot_id=broker_snapshot_id,
+        broker_account_id=broker_account_id,
         settled_cash=Decimal(settled),
         safety_reserve=Decimal(safety),
         ownership_treasury_reserved=Decimal(ownership),
@@ -31,10 +35,13 @@ def test_compute_authorized_trading_cash(
     )
     assert authorization.authorized_trading_cash == Decimal(expected)
     assert authorization.authorized_trading_cash >= Decimal("0")
+    assert authorization.broker_snapshot_id == broker_snapshot_id
+    assert authorization.broker_account_id == broker_account_id
 
 
 def test_compute_rejects_negative_inputs() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         KairoCapitalAuthorization.compute(
-            cell_id=uuid4(), settled_cash=Decimal("100"), safety_reserve=Decimal("-1")
+            cell_id=uuid4(), broker_snapshot_id=uuid4(), broker_account_id=uuid4(),
+            settled_cash=Decimal("100"), safety_reserve=Decimal("-1")
         )

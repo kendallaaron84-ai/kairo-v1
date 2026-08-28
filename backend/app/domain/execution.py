@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.enums import OrderSide, OrderType, RiskVerdict
+from app.domain.enums import OrderPurpose, OrderSide, OrderType, RiskVerdict
 
 
 class OrderIntentFact(BaseModel):
@@ -17,11 +17,30 @@ class OrderIntentFact(BaseModel):
     instrument_id: UUID
     siphon_id: UUID | None = None
     client_order_key: str
+    order_purpose: OrderPurpose
     side: OrderSide
-    quantity: Decimal = Field(gt=0)
+    target_notional_usd: Decimal | None = Field(default=None, gt=0)
+    target_quantity: Decimal | None = Field(default=None, gt=0)
     order_type: OrderType
-    limit_price: Decimal | None = None
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    stop_price: Decimal | None = Field(default=None, gt=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_validator(mode="after")
+    def sizing_and_prices_are_canonical(self) -> "OrderIntentFact":
+        if (self.target_notional_usd is None) == (self.target_quantity is None):
+            raise ValueError("exactly one intent sizing mode is required")
+        expected_prices = {
+            OrderType.MARKET: (False, False),
+            OrderType.LIMIT: (True, False),
+            OrderType.STOP: (False, True),
+        }
+        expected_limit, expected_stop = expected_prices[self.order_type]
+        if (self.limit_price is not None) != expected_limit:
+            raise ValueError("limit price does not match order type")
+        if (self.stop_price is not None) != expected_stop:
+            raise ValueError("stop price does not match order type")
+        return self
 
 
 class RiskDecisionFact(BaseModel):

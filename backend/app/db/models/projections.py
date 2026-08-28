@@ -69,7 +69,9 @@ class CurrentPosition(Base):
         ),
     )
     position_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
     broker_account_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("broker_accounts.broker_account_id"), nullable=False)
     instrument_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("instruments.instrument_id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)

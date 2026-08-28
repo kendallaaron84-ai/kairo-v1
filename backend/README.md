@@ -16,5 +16,10 @@ docker compose run --rm kairo-api pytest
 ```
 
 The API container creates the credentialed `kairo_runtime` role from environment variables,
-then applies Alembic migration `0001`. The migration grants that role append/read access to
-immutable ledger facts and controlled update access to configuration and projections.
+then applies Alembic migrations through `head`. Migration `0001` grants that role append/read
+access to immutable ledger facts and controlled update access to configuration and projections.
+
+Migration `0002` is the final Standard v0.1 conformance patch. It restores canonical option
+identity, broker execution capabilities, intent purpose and sizing semantics, broker cash and
+capital-authorization provenance, zero-evidence trust metadata, and capital-cell ownership of
+current positions. Phase 2B remains explicitly out of scope.

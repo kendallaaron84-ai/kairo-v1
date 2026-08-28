@@ -45,7 +45,8 @@ def make_intent(
         intent_id=uuid4(), cell_id=uuid4(), strategy_id=strategy.strategy_id,
         strategy_version=strategy.version_tag, instrument_id=instrument.instrument_id,
         siphon_id=siphon_id, client_order_key=client_order_key or f"intent-{uuid4()}",
-        side="BUY", quantity=Decimal("1"), order_type="MARKET",
+        order_purpose="ENTRY", side="BUY", target_quantity=Decimal("1"),
+        order_type="MARKET",
     )
     session.add(intent)
     session.flush()
@@ -91,8 +92,8 @@ def test_invalid_intent_lineage_is_rejected(db_session: Session, bad_field: str)
             strategy_version="9.9.9" if bad_field == "strategy" else strategy.version_tag,
             instrument_id=uuid4() if bad_field == "instrument" else instrument.instrument_id,
             siphon_id=uuid4() if bad_field == "siphon" else None,
-            client_order_key=f"bad-{uuid4()}", side="BUY", quantity=Decimal("1"),
-            order_type="MARKET",
+            client_order_key=f"bad-{uuid4()}", order_purpose="ENTRY", side="BUY",
+            target_quantity=Decimal("1"), order_type="MARKET",
         )
     )
     with pytest.raises(IntegrityError):
@@ -129,7 +130,8 @@ def test_duplicate_client_order_key_is_rejected(db_session: Session) -> None:
         OrderIntent(
             intent_id=uuid4(), cell_id=uuid4(), strategy_id=strategy.strategy_id,
             strategy_version=strategy.version_tag, instrument_id=instrument.instrument_id,
-            client_order_key=key, side="BUY", quantity=Decimal("1"), order_type="MARKET",
+            client_order_key=key, order_purpose="ENTRY", side="BUY",
+            target_quantity=Decimal("1"), order_type="MARKET",
         )
     )
     with pytest.raises(IntegrityError):
