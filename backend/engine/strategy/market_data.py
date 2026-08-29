@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -30,6 +31,8 @@ class MarketDataLineage(BaseModel):
     source_kind: str = Field(min_length=1)
     exact_prototype_replay: bool
     transformation: str = Field(min_length=1)
+    instrument_id: UUID
+    symbol: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def fidelity_claim_matches_mode(self) -> "MarketDataLineage":
@@ -43,6 +46,8 @@ class SampledPriceObservation(BaseModel):
 
     timestamp: datetime
     price: Decimal = Field(gt=0)
+    instrument_id: UUID
+    symbol: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def timestamp_is_aware(self) -> "SampledPriceObservation":
@@ -60,6 +65,8 @@ class CompletedMinuteClose(BaseModel):
     close: Decimal = Field(gt=0)
     completed_at: datetime
     source_observation_timestamp: datetime
+    instrument_id: UUID
+    symbol: str = Field(min_length=1)
 
 
 class LegacyReplayResult(BaseModel):
@@ -77,6 +84,8 @@ class ResearchMarketEvent(BaseModel):
 
     timestamp: datetime
     kind: ResearchEventKind
+    instrument_id: UUID
+    symbol: str = Field(min_length=1)
     price: Decimal | None = Field(default=None, gt=0)
     bid: Decimal | None = Field(default=None, gt=0)
     ask: Decimal | None = Field(default=None, gt=0)
@@ -119,6 +128,8 @@ class LegacyReplayProvider:
         *,
         source_id: str,
         provenance: LegacyReplayProvenance,
+        instrument_id: UUID,
+        symbol: str,
     ) -> None:
         self.lineage = MarketDataLineage(
             replay_mode=ReplayMode.LEGACY,
@@ -128,12 +139,18 @@ class LegacyReplayProvider:
                 provenance is LegacyReplayProvenance.EXACT_OBSERVED_SAMPLES
             ),
             transformation="15_SECOND_SAMPLES_TO_CLOSE_ONLY_COMPLETED_MINUTES",
+            instrument_id=instrument_id,
+            symbol=symbol,
         )
 
     def replay(
         self, observations: tuple[SampledPriceObservation, ...]
     ) -> LegacyReplayResult:
         _require_strict_chronology([item.timestamp for item in observations])
+        _require_single_instrument(
+            [(item.instrument_id, item.symbol) for item in observations],
+            expected=(self.lineage.instrument_id, self.lineage.symbol),
+        )
         completed: list[CompletedMinuteClose] = []
         current_minute: datetime | None = None
         last_observation: SampledPriceObservation | None = None
@@ -152,6 +169,8 @@ class LegacyReplayProvider:
                         close=last_observation.price,
                         completed_at=observation.timestamp,
                         source_observation_timestamp=last_observation.timestamp,
+                        instrument_id=last_observation.instrument_id,
+                        symbol=last_observation.symbol,
                     )
                 )
                 current_minute = minute_key
@@ -165,17 +184,37 @@ class LegacyReplayProvider:
 
 
 class ResearchReplayProvider:
-    def __init__(self, *, source_id: str, source_kind: str) -> None:
+    def __init__(
+        self,
+        *,
+        source_id: str,
+        source_kind: str,
+        instrument_id: UUID,
+        symbol: str,
+    ) -> None:
         self.lineage = MarketDataLineage(
             replay_mode=ReplayMode.RESEARCH,
             source_id=source_id,
             source_kind=source_kind,
             exact_prototype_replay=False,
             transformation="VENDOR_NEUTRAL_CANONICAL_EVENT_INGESTION",
+            instrument_id=instrument_id,
+            symbol=symbol,
         )
 
     def ingest(
         self, events: tuple[ResearchMarketEvent, ...]
     ) -> ResearchReplayResult:
         _require_strict_chronology([item.timestamp for item in events])
+        _require_single_instrument(
+            [(item.instrument_id, item.symbol) for item in events],
+            expected=(self.lineage.instrument_id, self.lineage.symbol),
+        )
         return ResearchReplayResult(events=events, lineage=self.lineage)
+
+
+def _require_single_instrument(
+    identities: list[tuple[UUID, str]], *, expected: tuple[UUID, str]
+) -> None:
+    if any(identity != expected for identity in identities):
+        raise ValueError("replay streams must contain exactly one canonical instrument")

@@ -54,6 +54,8 @@ per-value provenance, and distinct legacy/research replay-fidelity claims, and a
 overwriting a conflicting existing version. The Step 2 strategy foundation provides close-only
 legacy replay, vendor-neutral non-exact research ingestion, Decimal SMA-seeded EMA-9 values, and
 canonical option resolution without adding execution or broker behavior.
+Registry lifecycle `status = ACTIVE` only makes this immutable version selectable; it does not
+override `configuration.clearance = PAPER_ONLY` or grant execution authority.
 
 Phase 2C does not include broker integration, execution, Strategy 001 runtime, WebSockets, or UI
 visualization work.

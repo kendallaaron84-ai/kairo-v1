@@ -1,5 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID, uuid4
+
+import pytest
 
 from engine.strategy.indicators import PrototypeEMA9
 from engine.strategy.market_data import (
@@ -14,12 +17,22 @@ from engine.strategy.market_data import (
 
 
 START = datetime(2026, 8, 28, 13, 30, 5, tzinfo=UTC)
+INSTRUMENT_ID = UUID("11111111-1111-4111-8111-111111111111")
+SYMBOL = "TQQQ"
 
 
-def sample(seconds: int, price: str) -> SampledPriceObservation:
+def sample(
+    seconds: int,
+    price: str,
+    *,
+    instrument_id: UUID = INSTRUMENT_ID,
+    symbol: str = SYMBOL,
+) -> SampledPriceObservation:
     return SampledPriceObservation(
         timestamp=START + timedelta(seconds=seconds),
         price=Decimal(price),
+        instrument_id=instrument_id,
+        symbol=symbol,
     )
 
 
@@ -27,6 +40,8 @@ def legacy_provider() -> LegacyReplayProvider:
     return LegacyReplayProvider(
         source_id="prototype-capture-001",
         provenance=LegacyReplayProvenance.EXACT_OBSERVED_SAMPLES,
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
     )
 
 
@@ -44,10 +59,14 @@ def test_legacy_provider_preserves_close_only_semantics() -> None:
         "close",
         "completed_at",
         "source_observation_timestamp",
+        "instrument_id",
+        "symbol",
     }
     reconstructed = LegacyReplayProvider(
         source_id="historical-reconstruction-001",
         provenance=LegacyReplayProvenance.RECONSTRUCTED_SAMPLES,
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
     ).replay(observations)
     assert reconstructed.lineage.exact_prototype_replay is False
     assert reconstructed.lineage.source_kind == "RECONSTRUCTED_SAMPLES"
@@ -79,12 +98,16 @@ def test_research_provider_has_distinct_non_exact_lineage() -> None:
     quote = ResearchMarketEvent(
         timestamp=START,
         kind=ResearchEventKind.QUOTE,
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
         bid=Decimal("99.99"),
         ask=Decimal("100.01"),
     )
     bar = ResearchMarketEvent(
         timestamp=START + timedelta(minutes=1),
         kind=ResearchEventKind.BAR,
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
         open=Decimal("100"),
         high=Decimal("102"),
         low=Decimal("99"),
@@ -94,12 +117,54 @@ def test_research_provider_has_distinct_non_exact_lineage() -> None:
     result = ResearchReplayProvider(
         source_id="vendor-dataset-2026-08-28",
         source_kind="CANONICAL_HISTORICAL_QUOTES",
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
     ).ingest((quote, bar))
     assert result.lineage.replay_mode is ReplayMode.RESEARCH
     assert result.lineage.exact_prototype_replay is False
     assert result.lineage.source_id == "vendor-dataset-2026-08-28"
     assert result.events == (quote, bar)
     assert result.events[1].volume == Decimal("1200")
+
+
+def test_legacy_replay_preserves_instrument_identity() -> None:
+    result = legacy_provider().replay((sample(0, "100"), sample(60, "101")))
+    close = result.completed_minutes[0]
+    assert (close.instrument_id, close.symbol) == (INSTRUMENT_ID, SYMBOL)
+    assert (result.lineage.instrument_id, result.lineage.symbol) == (
+        INSTRUMENT_ID,
+        SYMBOL,
+    )
+
+
+def test_research_replay_preserves_instrument_identity() -> None:
+    event = ResearchMarketEvent(
+        timestamp=START,
+        kind=ResearchEventKind.TRADE,
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
+        price=Decimal("100"),
+    )
+    result = ResearchReplayProvider(
+        source_id="research-source",
+        source_kind="TRADE_ARCHIVE",
+        instrument_id=INSTRUMENT_ID,
+        symbol=SYMBOL,
+    ).ingest((event,))
+    assert (result.events[0].instrument_id, result.events[0].symbol) == (
+        INSTRUMENT_ID,
+        SYMBOL,
+    )
+
+
+def test_mixed_instrument_legacy_stream_is_rejected_or_partitioned() -> None:
+    with pytest.raises(ValueError, match="exactly one canonical instrument"):
+        legacy_provider().replay(
+            (
+                sample(0, "100"),
+                sample(60, "50", instrument_id=uuid4(), symbol="SQQQ"),
+            )
+        )
 
 
 def test_ema_first_eight_values_unavailable() -> None:

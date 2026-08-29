@@ -52,6 +52,15 @@ def test_registry_seed_is_idempotent(db_session: Session) -> None:
     assert count == 1
 
 
+def test_registry_active_status_does_not_override_paper_only_clearance(
+    db_session: Session,
+) -> None:
+    strategy = db_session.get(StrategyRegistry, (STRATEGY_ID, STRATEGY_VERSION))
+    assert strategy is not None
+    assert strategy.status == "ACTIVE"
+    assert strategy.configuration["clearance"] == "PAPER_ONLY"
+
+
 def test_registry_seed_rejects_conflicting_v100(db_session: Session) -> None:
     strategy = db_session.get(StrategyRegistry, (STRATEGY_ID, STRATEGY_VERSION))
     assert strategy is not None

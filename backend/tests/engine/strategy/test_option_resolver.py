@@ -1,9 +1,14 @@
 from datetime import date
 from decimal import Decimal
+from uuid import UUID, uuid4
+
+import pytest
 
 from app.domain.enums import OptionRight
+from app.domain.instruments import CanonicalInstrument
 from engine.strategy.option_resolver import (
     LegacySessionExpirationResolver,
+    MappingInstrumentLookup,
     OptionContractCandidate,
     is_legacy_eligible,
     resolve_legacy_option,
@@ -15,6 +20,7 @@ SESSION_DATE = date(2026, 8, 28)
 
 def contract(**updates) -> OptionContractCandidate:
     values = {
+        "instrument_id": uuid4(),
         "underlying_symbol": "TQQQ",
         "expiration_date": SESSION_DATE,
         "strike_price": Decimal("50"),
@@ -31,13 +37,35 @@ def contract(**updates) -> OptionContractCandidate:
     return OptionContractCandidate(**values)
 
 
-def resolve(candidates: tuple[OptionContractCandidate, ...]):
+def canonical(candidate: OptionContractCandidate, **updates) -> CanonicalInstrument:
+    values = {
+        "instrument_id": candidate.instrument_id,
+        "symbol": f"OPT-{candidate.instrument_id.hex[:12]}",
+        "asset_class": "OPTION",
+        "underlying_symbol": candidate.underlying_symbol,
+        "contract_symbol": candidate.contract_symbol,
+        "expiration_date": candidate.expiration_date,
+        "strike_price": candidate.strike_price,
+        "option_right": candidate.option_right,
+        "contract_multiplier": candidate.contract_multiplier,
+        "listing_type": candidate.listing_type,
+    }
+    values.update(updates)
+    return CanonicalInstrument(**values)
+
+
+def resolve(
+    candidates: tuple[OptionContractCandidate, ...],
+    canonical_instruments: tuple[CanonicalInstrument, ...] | None = None,
+):
+    instruments = canonical_instruments or tuple(canonical(item) for item in candidates)
     return resolve_legacy_option(
         candidates=candidates,
         underlying_symbol="TQQQ",
         expiration_date=SESSION_DATE,
         option_right=OptionRight.CALL,
         spot_price=Decimal("50"),
+        canonical_lookup=MappingInstrumentLookup(instruments),
     )
 
 
@@ -96,6 +124,30 @@ def test_legacy_expiration_resolved_once_per_session() -> None:
 
 
 def test_option_contract_uses_canonical_multiplier() -> None:
-    resolved = resolve((contract(contract_multiplier=Decimal("10")),))
+    candidate = contract(contract_multiplier=Decimal("10"))
+    resolved = resolve((candidate,), (canonical(candidate),))
     assert resolved is not None
     assert resolved.contract_multiplier == Decimal("10")
+
+
+def test_option_resolver_uses_canonical_multiplier() -> None:
+    candidate = contract(contract_multiplier=Decimal("10"))
+    authoritative = canonical(candidate, contract_multiplier=Decimal("10"))
+    resolved = resolve((candidate,), (authoritative,))
+    assert resolved is not None
+    assert resolved.contract_multiplier == authoritative.contract_multiplier
+
+
+def test_option_resolver_rejects_candidate_multiplier_mismatch() -> None:
+    candidate = contract(contract_multiplier=Decimal("100"))
+    authoritative = canonical(candidate, contract_multiplier=Decimal("10"))
+    with pytest.raises(ValueError, match="contract_multiplier"):
+        resolve((candidate,), (authoritative,))
+
+
+def test_option_resolver_returns_canonical_instrument_id() -> None:
+    canonical_id = UUID("22222222-2222-4222-8222-222222222222")
+    candidate = contract(instrument_id=canonical_id)
+    resolved = resolve((candidate,), (canonical(candidate),))
+    assert resolved is not None
+    assert resolved.instrument_id == canonical_id
