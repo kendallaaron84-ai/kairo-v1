@@ -61,14 +61,25 @@ The first observation initializes the current minute and does not close a bar. A
 minute is closed only on a later observation whose minute key differs. Signals and
 trend reversals therefore use completed closes, not the currently forming minute.
 
-### Legacy replay implication
+### Frozen replay/data-mode boundary
 
-Exact prototype replay would need to reproduce the ordered 15-second quote samples,
-poll failures, minute-boundary arrival behavior, and loop drift. Replaying canonical
-one-minute bars can reproduce the indicator formula but cannot prove exact parity
-with the prototype's quote-sampling path. This is why a future legacy compatibility
-mode and a higher-fidelity research mode must remain separate. Neither is built in
-Step 1.
+`LEGACY_REPLAY_MODE` must reproduce what the prototype actually observed: ordered
+15-second sampled underlying prices aggregated by the prototype's minute-boundary
+rule into a close-only one-minute series. Where the source record contains poll
+failures, arrival timing, or loop drift, legacy replay must preserve their effect on
+the resulting closes. A native OHLCV bar must not be substituted for that observed
+close-only series and labeled exact prototype replay.
+
+`RESEARCH_REPLAY_MODE` may consume canonical historical ticks, trades, quotes, or
+OHLCV bars to test the same strategy hypothesis with better market-data fidelity.
+Its results must be labeled research results and must never be represented as an
+exact replay of the original bot. Resampling higher-fidelity history at nominal
+15-second intervals is still a reconstruction unless it reproduces the prototype's
+actual observations and timing path.
+
+Both modes may share the frozen indicator mathematics after producing their input
+close series, but their evidence lineage, fidelity claim, and result identity must
+remain distinct. Neither mode is implemented in Step 1.
 
 ## 2. Indicator calculation and readiness
 
@@ -344,10 +355,10 @@ the source history.
 | Evidence lineage | CSV plus mutable in-memory statistics; no planned-risk, regime, MFE/MAE, or settlement lineage. | Immutable ledger and evidence manifests are required; missing evidence remains insufficient for Trust promotion. |
 | Retry/idempotency | Reads retry; submissions intentionally do not. | Writes require canonical idempotency and observation/reconciliation semantics rather than blind retry or assumed failure. |
 
-The 15-second sampler also conflicts with using it as the primary research dataset.
-It belongs only to future `LEGACY_REPLAY_MODE`. Future `RESEARCH_REPLAY_MODE` must
-use actual historical trades, quotes, or bars transformed into canonical market
-events. Step 2 remains unimplemented.
+The 15-second sampled-price path belongs to future `LEGACY_REPLAY_MODE`. Future
+`RESEARCH_REPLAY_MODE` may use actual historical ticks, trades, quotes, or OHLCV
+bars transformed into canonical market events, but its higher-fidelity results are
+not exact prototype replay. Step 2 remains unimplemented.
 
 ## 12. Freeze-candidate `strategy_registry.configuration`
 
@@ -463,8 +474,9 @@ document or a separate runtime policy. No registry mutation occurs in Step 1.
    two-position concurrency cap.
 4. Confirm Kairo uses canonical contract multipliers while preserving the inherited
    50% settled-cash / three-slot economics.
-5. Decide whether exact legacy replay must reproduce 15-second samples and missing-poll
-   behavior, rather than only consume resulting one-minute closes.
+5. **RESOLVED:** legacy compatibility must reproduce the close-only minute series
+   derived from the prototype's 15-second sampled observations. Research replay may
+   use canonical OHLCV/tick data but must carry a distinct, non-exact fidelity claim.
 6. Decide how a future runtime handles the prototype's unresolved 16:00 open-position
    hazard without claiming that command emission equals execution.
 7. Approve the registry configuration/provenance shape before any row is seeded.
