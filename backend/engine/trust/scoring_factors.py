@@ -10,14 +10,15 @@ from engine.trust.models import (
 )
 
 
-TRUST_V01_FACTORS = (
-    "risk_adjusted_outcomes",
-    "drawdown_control",
-    "execution_quality",
-    "excursion_efficiency",
-    "strategy_discipline",
-    "regime_consistency",
-)
+TRUST_V01_WEIGHTS = {
+    "capital_preservation": Decimal("0.25"),
+    "strategy_discipline": Decimal("0.20"),
+    "execution_fidelity": Decimal("0.20"),
+    "context_regime_quality": Decimal("0.15"),
+    "risk_efficiency": Decimal("0.10"),
+    "qualified_capital_production": Decimal("0.10"),
+}
+TRUST_V01_FACTORS = tuple(TRUST_V01_WEIGHTS)
 
 HUNDRED = Decimal("100")
 
@@ -75,38 +76,10 @@ def adverse_slippage_usd(execution: ExecutionEvidence) -> Decimal | None:
     return adverse_per_unit * execution.quantity * execution.contract_multiplier
 
 
-def score_risk_adjusted_outcomes(
+def score_capital_preservation(
     evidence: TrustEvidenceBundle, weight: Decimal
 ) -> FactorScore:
-    factor = "risk_adjusted_outcomes"
-    trades = evidence.closed_trades
-    if not trades:
-        return _missing(factor, weight, "no closed-trade evidence")
-    if any(
-        trade.realized_pnl_usd is None
-        or trade.planned_risk_usd is None
-        or trade.settlement_verified is not True
-        for trade in trades
-    ):
-        return _missing(factor, weight, "planned-risk or settlement evidence is missing")
-    r_values = [
-        trade.realized_pnl_usd / trade.planned_risk_usd  # type: ignore[operator]
-        for trade in trades
-    ]
-    average_r = sum(r_values, start=Decimal("0")) / Decimal(len(r_values))
-    return FactorScore(
-        factor=factor,
-        status=EvidenceStatus.AVAILABLE,
-        score=_clamp(Decimal("50") + Decimal("25") * average_r),
-        weight=weight,
-        evidence_count=len(trades),
-    )
-
-
-def score_drawdown_control(
-    evidence: TrustEvidenceBundle, weight: Decimal
-) -> FactorScore:
-    factor = "drawdown_control"
+    factor = "capital_preservation"
     result = chronological_drawdown(list(evidence.equity_curve))
     if result is None or len(evidence.equity_curve) < 2:
         return _missing(factor, weight, "chronological equity-path evidence is missing")
@@ -120,17 +93,19 @@ def score_drawdown_control(
     )
 
 
-def score_execution_quality(
+def score_execution_fidelity(
     evidence: TrustEvidenceBundle, weight: Decimal
 ) -> FactorScore:
-    factor = "execution_quality"
+    factor = "execution_fidelity"
     executions = evidence.executions
     if not executions or any(item.reference_price is None for item in executions):
         return _missing(factor, weight, "reference-price execution evidence is missing")
     adverse = [adverse_slippage_usd(item) for item in executions]
     reference_notional = sum(
         (
-            item.reference_price * item.quantity * item.contract_multiplier  # type: ignore[operator]
+            item.reference_price
+            * item.quantity
+            * item.contract_multiplier  # type: ignore[operator]
             for item in executions
         ),
         start=Decimal("0"),
@@ -148,13 +123,18 @@ def score_execution_quality(
     )
 
 
-def score_excursion_efficiency(
+def score_risk_efficiency(
     evidence: TrustEvidenceBundle, weight: Decimal
 ) -> FactorScore:
-    factor = "excursion_efficiency"
+    factor = "risk_efficiency"
     trades = evidence.closed_trades
-    if not trades or any(trade.mfe_r is None or trade.mae_r is None for trade in trades):
-        return _missing(factor, weight, "MFE/MAE path evidence is missing")
+    if not trades or any(
+        trade.planned_risk_usd is None
+        or trade.mfe_r is None
+        or trade.mae_r is None
+        for trade in trades
+    ):
+        return _missing(factor, weight, "planned-risk or MFE/MAE path evidence is missing")
     average_mfe = sum((trade.mfe_r for trade in trades), start=Decimal("0")) / Decimal(
         len(trades)
     )
@@ -195,10 +175,10 @@ def score_strategy_discipline(
     )
 
 
-def score_regime_consistency(
+def score_context_regime_quality(
     evidence: TrustEvidenceBundle, weight: Decimal
 ) -> FactorScore:
-    factor = "regime_consistency"
+    factor = "context_regime_quality"
     trades = evidence.closed_trades
     if not trades or any(
         trade.regime is None or trade.realized_pnl_usd is None for trade in trades
@@ -214,18 +194,51 @@ def score_regime_consistency(
     )
 
 
+def score_qualified_capital_production(
+    evidence: TrustEvidenceBundle, weight: Decimal
+) -> FactorScore:
+    factor = "qualified_capital_production"
+    trades = evidence.closed_trades
+    if not trades or any(
+        trade.realized_pnl_usd is None or trade.settlement_verified is not True
+        for trade in trades
+    ):
+        return _missing(factor, weight, "settled realized-profit evidence is missing")
+
+    settled_results = [trade.realized_pnl_usd for trade in trades]
+    gross_absolute = sum((abs(value) for value in settled_results), start=Decimal("0"))
+    net_realized = sum(settled_results, start=Decimal("0"))
+    # No settled movement is proven production of zero, not fabricated neutral evidence.
+    score = (
+        Decimal("0")
+        if gross_absolute == 0
+        else _clamp(HUNDRED * max(Decimal("0"), net_realized) / gross_absolute)
+    )
+    return FactorScore(
+        factor=factor,
+        status=EvidenceStatus.AVAILABLE,
+        score=score,
+        weight=weight,
+        evidence_count=len(trades),
+        reason=f"settled_realized_profit_usd={net_realized}",
+    )
+
+
 def compute_factor_scores(
     evidence: TrustEvidenceBundle, weights: dict[str, Decimal]
 ) -> tuple[FactorScore, ...]:
     scorers = (
-        score_risk_adjusted_outcomes,
-        score_drawdown_control,
-        score_execution_quality,
-        score_excursion_efficiency,
+        score_capital_preservation,
         score_strategy_discipline,
-        score_regime_consistency,
+        score_execution_fidelity,
+        score_context_regime_quality,
+        score_risk_efficiency,
+        score_qualified_capital_production,
     )
-    return tuple(scorer(evidence, weights[scorer.__name__.removeprefix("score_")]) for scorer in scorers)
+    return tuple(
+        scorer(evidence, weights[scorer.__name__.removeprefix("score_")])
+        for scorer in scorers
+    )
 
 
 def weighted_score(

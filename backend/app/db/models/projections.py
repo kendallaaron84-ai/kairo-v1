@@ -29,11 +29,23 @@ class CapitalCell(Base):
         CheckConstraint(
             "seed_capital >= 0", name="ck_capital_cells_seed_nonnegative"
         ),
+        CheckConstraint(
+            "status IN ('INITIALIZING', 'ACTIVE', 'PAUSED', 'HALTED_FOR_DAY', "
+            "'REPLICATION_READY', 'DECOMMISSIONED')",
+            name="valid_lifecycle_status",
+        ),
+        CheckConstraint(
+            "autonomy_tier IN ('APPRENTICE', 'GUARDED', 'CAPITAL_BUILDER')",
+            name="valid_autonomy_tier",
+        ),
     )
     cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     cell_code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     seed_capital: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    autonomy_tier: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="APPRENTICE", server_default="APPRENTICE"
+    )
     strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
     strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
     target_treasury_code: Mapped[str] = mapped_column(String(50), nullable=False)

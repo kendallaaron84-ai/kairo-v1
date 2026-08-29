@@ -1,4 +1,3 @@
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -19,6 +18,7 @@ from engine.trust.models import (
 )
 from engine.trust.scoring_factors import (
     TRUST_V01_FACTORS,
+    TRUST_V01_WEIGHTS,
     compute_factor_scores,
     weighted_score,
 )
@@ -58,7 +58,7 @@ class TrustEvaluator:
         factors = compute_factor_scores(window, spec.factor_weights)
         score = weighted_score(factors, spec.required_factors)
         recommended = recommend_autonomy_tier(
-            current_tier=cell.status,
+            current_tier=cell.autonomy_tier,
             eligibility=eligibility,
             score=score,
             trade_count=len(window.closed_trades),
@@ -66,7 +66,11 @@ class TrustEvaluator:
             promotion_thresholds=spec.promotion_thresholds,
             demotion_thresholds=spec.demotion_thresholds,
         )
-        current_index = TIER_ORDER.index(cell.status) if cell.status in TIER_ORDER else 0
+        current_index = (
+            TIER_ORDER.index(cell.autonomy_tier)
+            if cell.autonomy_tier in TIER_ORDER
+            else 0
+        )
         recommended_index = TIER_ORDER.index(recommended)
         eligible_for_promotion = (
             eligibility is SafetyEligibility.ELIGIBLE
@@ -110,7 +114,7 @@ class TrustEvaluator:
                 window_end=window_end,
                 evidence_manifest_hash=manifest,
                 eligibility_status=eligibility.value,
-                current_autonomy_tier=cell.status,
+                current_autonomy_tier=cell.autonomy_tier,
                 recommended_autonomy_tier=recommended,
                 disqualifiers=list(disqualifiers),
                 factor_breakdown={
@@ -132,7 +136,7 @@ class TrustEvaluator:
             eligibility_status=eligibility,
             score=score,
             eligible_for_promotion=eligible_for_promotion,
-            current_autonomy_tier=cell.status,
+            current_autonomy_tier=cell.autonomy_tier,
             recommended_autonomy_tier=recommended,
             evidence_trade_count=len(window.closed_trades),
             window_trade_count=len(window.closed_trades),
@@ -152,10 +156,8 @@ class TrustEvaluator:
         expected = set(TRUST_V01_FACTORS)
         if set(spec.factor_weights) != expected or set(spec.required_factors) != expected:
             raise TrustPolicyError("TRUST-v0.1 requires exactly all six canonical factors")
-        if any(weight <= 0 for weight in spec.factor_weights.values()):
-            raise TrustPolicyError("factor weights must be positive")
-        if sum(spec.factor_weights.values(), start=Decimal("0")) <= 0:
-            raise TrustPolicyError("factor weights cannot sum to zero")
+        if spec.factor_weights != TRUST_V01_WEIGHTS:
+            raise TrustPolicyError("TRUST-v0.1 factor weights must match frozen policy")
         return spec
 
     @staticmethod

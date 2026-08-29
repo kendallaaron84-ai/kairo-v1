@@ -1,13 +1,14 @@
 from decimal import Decimal
 
-from engine.trust.models import AutonomyTier, SafetyEligibility
+from app.domain.enums import AutonomyTier
+from engine.trust.models import SafetyEligibility
 
 
 WINDOWS = {20: "W_20", 50: "W_50"}
 TIER_ORDER = (
     AutonomyTier.APPRENTICE.value,
     AutonomyTier.GUARDED.value,
-    AutonomyTier.AUTONOMOUS.value,
+    AutonomyTier.CAPITAL_BUILDER.value,
 )
 
 

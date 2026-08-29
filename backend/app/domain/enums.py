@@ -7,10 +7,18 @@ class RecordStatus(StrEnum):
 
 
 class CellStatus(StrEnum):
+    INITIALIZING = "INITIALIZING"
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    HALTED_FOR_DAY = "HALTED_FOR_DAY"
+    REPLICATION_READY = "REPLICATION_READY"
+    DECOMMISSIONED = "DECOMMISSIONED"
+
+
+class AutonomyTier(StrEnum):
     APPRENTICE = "APPRENTICE"
     GUARDED = "GUARDED"
-    HALTED = "HALTED"
-    RETIRED = "RETIRED"
+    CAPITAL_BUILDER = "CAPITAL_BUILDER"
 
 
 class OrderSide(StrEnum):

@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.enums import OrderSide
+from app.domain.enums import AutonomyTier, OrderSide
 
 
 class EvidenceStatus(StrEnum):
@@ -18,12 +18,6 @@ class SafetyEligibility(StrEnum):
     ELIGIBLE = "ELIGIBLE"
     DISQUALIFIED = "DISQUALIFIED"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
-
-
-class AutonomyTier(StrEnum):
-    APPRENTICE = "APPRENTICE"
-    GUARDED = "GUARDED"
-    AUTONOMOUS = "AUTONOMOUS"
 
 
 class ClosedTradeEvidence(BaseModel):

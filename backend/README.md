@@ -37,10 +37,16 @@ instruments, preventing one instrument's update from erasing every other positio
 
 Migration `0005` extends the immutable trust-evaluation ledger with canonical capital-cell
 lineage, evidence-window boundaries, Tier 1 eligibility, autonomy recommendations, and a SHA-256
-evidence manifest. The Trust engine evaluates six policy-weighted process factors over W_20/W_50
-closed-trade windows, recomputes from underlying facts, and records recommendations without
-mutating the cell tier. Missing reconciliation, settlement, planned-risk, regime, reference-price,
-or MFE/MAE evidence remains explicitly insufficient and cannot manufacture a score or promotion.
+evidence manifest.
+
+Migration `0006` separates lifecycle `status` from the canonical `autonomy_tier`, migrates legacy
+overloaded values without discarding their governance meaning, and constrains both axes. The Trust
+engine evaluates the frozen TRUST-v0.1 factors exactly: Capital Preservation (25%), Strategy
+Discipline (20%), Execution Fidelity (20%), Context/Regime Quality (15%), Risk Efficiency (10%),
+and Qualified Capital Production (10%). It recomputes from underlying facts over W_20/W_50 and
+records recommendations without mutating lifecycle or autonomy state. Missing reconciliation,
+settlement, planned-risk, regime, reference-price, or MFE/MAE evidence remains explicitly insufficient and
+cannot manufacture a score or promotion.
 
 Phase 2C does not include broker integration, execution, Strategy 001 runtime, WebSockets, or UI
 visualization work.

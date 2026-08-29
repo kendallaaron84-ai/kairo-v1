@@ -285,6 +285,16 @@ class TrustEvaluation(Base):
             "char_length(evidence_manifest_hash) IN (0, 64)",
             name="manifest_shape",
         ),
+        CheckConstraint(
+            "current_autonomy_tier IN "
+            "('APPRENTICE', 'GUARDED', 'CAPITAL_BUILDER')",
+            name="valid_current_autonomy_tier",
+        ),
+        CheckConstraint(
+            "recommended_autonomy_tier IN "
+            "('APPRENTICE', 'GUARDED', 'CAPITAL_BUILDER')",
+            name="valid_recommended_autonomy_tier",
+        ),
         Index("ix_trust_evaluations_cell_evaluated", "cell_id", "evaluated_at"),
     )
     evaluation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)

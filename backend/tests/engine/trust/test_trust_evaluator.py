@@ -22,6 +22,8 @@ from engine.trust.models import (
     TrustEvidenceBundle,
 )
 from engine.trust.scoring_factors import (
+    TRUST_V01_FACTORS,
+    TRUST_V01_WEIGHTS,
     adverse_slippage_usd,
     chronological_drawdown,
 )
@@ -31,16 +33,21 @@ pytestmark = pytest.mark.integration
 
 
 FACTOR_WEIGHTS = {
-    "risk_adjusted_outcomes": "0.20",
-    "drawdown_control": "0.15",
-    "execution_quality": "0.15",
-    "excursion_efficiency": "0.15",
+    "capital_preservation": "0.25",
     "strategy_discipline": "0.20",
-    "regime_consistency": "0.15",
+    "execution_fidelity": "0.20",
+    "context_regime_quality": "0.15",
+    "risk_efficiency": "0.10",
+    "qualified_capital_production": "0.10",
 }
 
 
-def seed_policy_and_cell(session: Session, *, status: str = "APPRENTICE"):
+def seed_policy_and_cell(
+    session: Session,
+    *,
+    status: str = "ACTIVE",
+    autonomy_tier: str = "APPRENTICE",
+):
     strategy = StrategyRegistry(
         strategy_id=f"TRUST-{uuid4().hex[:8]}",
         version_tag="1.0.0",
@@ -55,8 +62,8 @@ def seed_policy_and_cell(session: Session, *, status: str = "APPRENTICE"):
         policy_document={
             "factor_weights": FACTOR_WEIGHTS,
             "required_factors": list(FACTOR_WEIGHTS),
-            "promotion_thresholds": {"GUARDED": "70", "AUTONOMOUS": "85"},
-            "demotion_thresholds": {"GUARDED": "55", "AUTONOMOUS": "70"},
+            "promotion_thresholds": {"GUARDED": "70", "CAPITAL_BUILDER": "85"},
+            "demotion_thresholds": {"GUARDED": "55", "CAPITAL_BUILDER": "70"},
         },
     )
     session.add_all([strategy, policy])
@@ -66,6 +73,7 @@ def seed_policy_and_cell(session: Session, *, status: str = "APPRENTICE"):
         cell_code=f"TRUST-CELL-{uuid4().hex[:8]}",
         seed_capital=Decimal("100"),
         status=status,
+        autonomy_tier=autonomy_tier,
         strategy_id=strategy.strategy_id,
         strategy_version=strategy.version_tag,
         target_treasury_code="META",
@@ -128,6 +136,61 @@ def factor(result, name: str):
     return next(item for item in result.factors if item.factor == name)
 
 
+def test_trust_v01_factor_names_and_weights_match_frozen_policy() -> None:
+    assert TRUST_V01_FACTORS == (
+        "capital_preservation",
+        "strategy_discipline",
+        "execution_fidelity",
+        "context_regime_quality",
+        "risk_efficiency",
+        "qualified_capital_production",
+    )
+    assert TRUST_V01_WEIGHTS == {
+        name: Decimal(weight) for name, weight in FACTOR_WEIGHTS.items()
+    }
+    assert sum(TRUST_V01_WEIGHTS.values(), start=Decimal("0")) == Decimal("1.00")
+
+
+def test_qualified_capital_production_uses_settled_realized_profit(
+    db_session: Session,
+) -> None:
+    cell, policy = seed_policy_and_cell(db_session)
+    evidence = complete_evidence(cell.cell_id)
+    trades = tuple(
+        trade.model_copy(
+            update={
+                "realized_pnl_usd": Decimal("2") if index < 10 else Decimal("-1"),
+                "planned_risk_usd": Decimal("999"),
+                "settlement_verified": True,
+            }
+        )
+        for index, trade in enumerate(evidence.closed_trades)
+    )
+    result = TrustEvaluator(db_session).evaluate(
+        cell_id=cell.cell_id,
+        policy_id=policy.policy_id,
+        policy_version=policy.version_tag,
+        window_size=20,
+        evidence=evidence.model_copy(update={"closed_trades": trades}),
+    )
+    production = factor(result, "qualified_capital_production")
+    assert production.score == Decimal("100") / Decimal("3")
+    assert production.reason == "settled_realized_profit_usd=10"
+
+    unverified = list(trades)
+    unverified[0] = unverified[0].model_copy(update={"settlement_verified": None})
+    incomplete = TrustEvaluator(db_session).evaluate(
+        cell_id=cell.cell_id,
+        policy_id=policy.policy_id,
+        policy_version=policy.version_tag,
+        window_size=20,
+        evidence=evidence.model_copy(update={"closed_trades": tuple(unverified)}),
+    )
+    incomplete_production = factor(incomplete, "qualified_capital_production")
+    assert incomplete_production.status is EvidenceStatus.INSUFFICIENT_EVIDENCE
+    assert incomplete_production.score is None
+
+
 def test_insufficient_safety_evidence_blocks_promotion(db_session: Session) -> None:
     cell, policy = seed_policy_and_cell(db_session)
     evidence = complete_evidence(cell.cell_id).model_copy(
@@ -165,7 +228,7 @@ def test_missing_factor_evidence_blocks_promotion_without_score_fabrication(
         window_size=20,
         evidence=evidence.model_copy(update={"closed_trades": tuple(trades)}),
     )
-    efficiency = factor(result, "excursion_efficiency")
+    efficiency = factor(result, "risk_efficiency")
     assert efficiency.status is EvidenceStatus.INSUFFICIENT_EVIDENCE
     assert efficiency.score is None
     assert result.score is None
@@ -188,7 +251,7 @@ def test_undefined_efficiency_returns_insufficient_evidence(
         window_size=20,
         evidence=evidence.model_copy(update={"closed_trades": trades}),
     )
-    efficiency = factor(result, "excursion_efficiency")
+    efficiency = factor(result, "risk_efficiency")
     assert efficiency.status is EvidenceStatus.INSUFFICIENT_EVIDENCE
     assert efficiency.score is None
     assert result.score is None
@@ -302,7 +365,7 @@ def test_rolling_window_recomputes_over_n_trades(db_session: Session) -> None:
         evidence=combined,
     )
     assert prior.score != current.score
-    assert factor(current, "risk_adjusted_outcomes").score == Decimal("75")
+    assert factor(current, "qualified_capital_production").score == Decimal("100")
     assert current.window_trade_count == 20
 
 
@@ -311,6 +374,7 @@ def test_evaluator_emits_recommendation_without_mutating_cell_tier(
 ) -> None:
     cell, policy = seed_policy_and_cell(db_session)
     original_status = cell.status
+    original_tier = cell.autonomy_tier
     result = TrustEvaluator(db_session).evaluate(
         cell_id=cell.cell_id,
         policy_id=policy.policy_id,
@@ -320,13 +384,34 @@ def test_evaluator_emits_recommendation_without_mutating_cell_tier(
     )
     db_session.refresh(cell)
     assert result.recommended_autonomy_tier == "GUARDED"
-    assert cell.status == original_status == "APPRENTICE"
+    assert cell.status == original_status == "ACTIVE"
+    assert cell.autonomy_tier == original_tier == "APPRENTICE"
 
 
-def test_w50_recommends_autonomous_without_mutating_guarded_cell(
+def test_autonomy_tier_is_read_independently_from_lifecycle_status(
     db_session: Session,
 ) -> None:
-    cell, policy = seed_policy_and_cell(db_session, status="GUARDED")
+    cell, policy = seed_policy_and_cell(
+        db_session, status="PAUSED", autonomy_tier="GUARDED"
+    )
+    result = TrustEvaluator(db_session).evaluate(
+        cell_id=cell.cell_id,
+        policy_id=policy.policy_id,
+        policy_version=policy.version_tag,
+        window_size=20,
+        evidence=complete_evidence(cell.cell_id),
+    )
+    db_session.refresh(cell)
+    assert result.current_autonomy_tier == "GUARDED"
+    assert result.recommended_autonomy_tier == "CAPITAL_BUILDER"
+    assert cell.status == "PAUSED"
+    assert cell.autonomy_tier == "GUARDED"
+
+
+def test_w50_recommends_capital_builder_without_mutating_guarded_cell(
+    db_session: Session,
+) -> None:
+    cell, policy = seed_policy_and_cell(db_session, autonomy_tier="GUARDED")
     result = TrustEvaluator(db_session).evaluate(
         cell_id=cell.cell_id,
         policy_id=policy.policy_id,
@@ -335,8 +420,9 @@ def test_w50_recommends_autonomous_without_mutating_guarded_cell(
         evidence=complete_evidence(cell.cell_id, count=50),
     )
     db_session.refresh(cell)
-    assert result.recommended_autonomy_tier == "AUTONOMOUS"
-    assert cell.status == "GUARDED"
+    assert result.recommended_autonomy_tier == "CAPITAL_BUILDER"
+    assert cell.status == "ACTIVE"
+    assert cell.autonomy_tier == "GUARDED"
 
 
 def test_immutable_evaluation_persistence_with_manifest_hash(

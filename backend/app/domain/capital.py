@@ -114,6 +114,7 @@ class CapitalCellProjection(BaseModel):
     cell_code: str
     seed_capital: Decimal = Field(ge=0)
     status: str
+    autonomy_tier: str = "APPRENTICE"
     strategy_id: str
     strategy_version: str
     target_treasury_code: str
