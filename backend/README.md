@@ -48,5 +48,12 @@ records recommendations without mutating lifecycle or autonomy state. Missing re
 settlement, planned-risk, regime, reference-price, or MFE/MAE evidence remains explicitly insufficient and
 cannot manufacture a score or promotion.
 
+Migration `0007` idempotently seeds the immutable `EMA-CROSS-001 v1.0.0` registry
+configuration from the accepted 35-value behavior freeze. The seed records source SHA-256,
+per-value provenance, and distinct legacy/research replay-fidelity claims, and aborts rather than
+overwriting a conflicting existing version. The Step 2 strategy foundation provides close-only
+legacy replay, vendor-neutral non-exact research ingestion, Decimal SMA-seeded EMA-9 values, and
+canonical option resolution without adding execution or broker behavior.
+
 Phase 2C does not include broker integration, execution, Strategy 001 runtime, WebSockets, or UI
 visualization work.
