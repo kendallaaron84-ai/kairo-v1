@@ -58,6 +58,22 @@ def add_strategy(session: Session) -> StrategyRegistry:
     return strategy
 
 
+def add_cell(session: Session) -> CapitalCell:
+    strategy = add_strategy(session)
+    cell = CapitalCell(
+        cell_id=uuid4(),
+        cell_code=f"CELL-{uuid4().hex[:8]}",
+        seed_capital=Decimal("100"),
+        status="APPRENTICE",
+        strategy_id=strategy.strategy_id,
+        strategy_version=strategy.version_tag,
+        target_treasury_code="META",
+    )
+    session.add(cell)
+    session.flush()
+    return cell
+
+
 def test_complete_option_identity_is_first_class(db_session: Session) -> None:
     option = Instrument(
         instrument_id=uuid4(),
@@ -308,6 +324,7 @@ def test_capital_authorization_rejects_snapshot_account_mismatch(
 def test_zero_evidence_trust_evaluation_persists_explicit_metadata(
     db_session: Session,
 ) -> None:
+    cell = add_cell(db_session)
     policy = TrustPolicy(
         policy_id=uuid4(),
         version_tag="1.0.0",
@@ -318,7 +335,7 @@ def test_zero_evidence_trust_evaluation_persists_explicit_metadata(
     db_session.flush()
     evaluation = TrustEvaluation(
         evaluation_id=uuid4(),
-        cell_id=uuid4(),
+        cell_id=cell.cell_id,
         policy_id=policy.policy_id,
         policy_version=policy.version_tag,
         score=None,
@@ -337,6 +354,7 @@ def test_zero_evidence_trust_evaluation_persists_explicit_metadata(
 
 
 def test_zero_evidence_score_is_rejected(db_session: Session) -> None:
+    cell = add_cell(db_session)
     policy = TrustPolicy(
         policy_id=uuid4(),
         version_tag="1.0.0",
@@ -348,7 +366,7 @@ def test_zero_evidence_score_is_rejected(db_session: Session) -> None:
     db_session.add(
         TrustEvaluation(
             evaluation_id=uuid4(),
-            cell_id=uuid4(),
+            cell_id=cell.cell_id,
             policy_id=policy.policy_id,
             policy_version=policy.version_tag,
             score=Decimal("50"),

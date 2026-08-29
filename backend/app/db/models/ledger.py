@@ -265,14 +265,32 @@ class TrustEvaluation(Base):
             name="fk_trust_evaluations_policy_version",
         ),
         CheckConstraint(
-            "(evidence_trade_count = 0 AND score IS NULL AND eligible_for_promotion = false) "
-            "OR (evidence_trade_count > 0 AND score IS NOT NULL)",
+            "evidence_trade_count >= 0 AND window_trade_count >= 0 "
+            "AND (evidence_trade_count > 0 OR score IS NULL) "
+            "AND (eligible_for_promotion = false OR "
+            "(evidence_trade_count > 0 AND score IS NOT NULL "
+            "AND eligibility_status = 'ELIGIBLE'))",
             name="evidence_score_semantics",
+        ),
+        CheckConstraint(
+            "eligibility_status IN ('ELIGIBLE', 'DISQUALIFIED', "
+            "'INSUFFICIENT_EVIDENCE')",
+            name="valid_eligibility",
+        ),
+        CheckConstraint(
+            "window_start IS NULL OR window_end IS NULL OR window_end >= window_start",
+            name="window_order",
+        ),
+        CheckConstraint(
+            "char_length(evidence_manifest_hash) IN (0, 64)",
+            name="manifest_shape",
         ),
         Index("ix_trust_evaluations_cell_evaluated", "cell_id", "evaluated_at"),
     )
     evaluation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
     policy_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
     score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
@@ -281,6 +299,19 @@ class TrustEvaluation(Base):
         Boolean, nullable=False, default=False
     )
     evidence_trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    window_trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    eligibility_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="INSUFFICIENT_EVIDENCE"
+    )
+    current_autonomy_tier: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="APPRENTICE"
+    )
+    recommended_autonomy_tier: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="APPRENTICE"
+    )
     disqualifiers: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     factor_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
