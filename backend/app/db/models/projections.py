@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -61,13 +62,35 @@ class OwnershipTreasuryHolding(Base):
         CheckConstraint(
             "fractional_shares >= 0", name="ck_treasury_holdings_shares_nonnegative"
         ),
-        UniqueConstraint("treasury_code", "instrument_id", name="uq_treasury_holding_instrument"),
+        CheckConstraint("total_shares >= 0", name="treasury_total_shares_nonnegative"),
+        CheckConstraint(
+            "cumulative_cost_basis_usd >= 0", name="treasury_basis_nonnegative"
+        ),
+        UniqueConstraint(
+            "cell_id", "instrument_id", "is_synthetic", name="uq_cell_instrument_holding"
+        ),
     )
     holding_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     treasury_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
     instrument_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("instruments.instrument_id"), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     dollars_contributed: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False, default=0)
     fractional_shares: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False, default=0)
+    total_shares: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False, default=0)
+    cumulative_cost_basis_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0
+    )
+    average_entry_price_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, default=0
+    )
+    last_marked_price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    market_value_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    unrealized_pnl_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    legacy_values_equivalent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 

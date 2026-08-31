@@ -641,5 +641,5 @@ def test_migration_0011_upgrade_and_downgrade_preserve_existing_lineage(migrated
         assert row == ("LEGACY-SIPHON-v0", Decimal("12.34"), Decimal("12.34"))
     command.downgrade(config, "0010")
     assert "policy_id" not in {column["name"] for column in inspect(engine).get_columns("siphon_events")}
-    command.upgrade(config, "0011")
+    command.upgrade(config, "head")
     engine.dispose()

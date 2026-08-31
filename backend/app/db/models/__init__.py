@@ -14,6 +14,9 @@ from app.db.models.ledger import (
     SiphonEvent,
     SiphonAllocation,
     SiphonProfitAttribution,
+    TreasuryCashConsumption,
+    TreasuryExecution,
+    TreasuryRegimeObservation,
     TrustEvaluation,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
@@ -49,6 +52,9 @@ __all__ = [
     "SiphonEvent",
     "SiphonAllocation",
     "SiphonProfitAttribution",
+    "TreasuryCashConsumption",
+    "TreasuryExecution",
+    "TreasuryRegimeObservation",
     "StrategyRegistry",
     "TrustEvaluation",
     "TrustPolicy",

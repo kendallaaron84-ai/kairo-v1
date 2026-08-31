@@ -32,6 +32,9 @@ EXPECTED_TABLES = {
     "fill_realized_pnl",
     "siphon_profit_attributions",
     "siphon_allocations",
+    "treasury_executions",
+    "treasury_cash_consumptions",
+    "treasury_regime_observations",
 }
 
 

@@ -123,6 +123,18 @@ class CapitalCellProjection(BaseModel):
 class OwnershipTreasuryHoldingProjection(BaseModel):
     holding_id: UUID = Field(default_factory=uuid4)
     treasury_code: str
+    cell_id: UUID
     instrument_id: UUID
+    symbol: str
+    is_synthetic: bool
+    # Retained legacy semantics. These are synchronized only when equivalence
+    # to the execution-derived fields has been established explicitly.
     dollars_contributed: Decimal = Field(default=Decimal("0"), ge=0)
     fractional_shares: Decimal = Field(default=Decimal("0"), ge=0)
+    legacy_values_equivalent: bool = False
+    total_shares: Decimal = Field(default=Decimal("0"), ge=0)
+    cumulative_cost_basis_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    average_entry_price_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    last_marked_price_usd: Decimal | None = Field(default=None, ge=0)
+    market_value_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    unrealized_pnl_usd: Decimal = Decimal("0")

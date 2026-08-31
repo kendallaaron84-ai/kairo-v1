@@ -168,6 +168,84 @@ class SiphonAllocation(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TreasuryExecution(Base):
+    __tablename__ = "treasury_executions"
+    __table_args__ = (
+        CheckConstraint("shares_executed > 0", name="treasury_exec_shares_positive"),
+        CheckConstraint("execution_price_usd > 0", name="treasury_exec_price_positive"),
+        CheckConstraint("gross_amount_usd > 0", name="treasury_exec_gross_positive"),
+        CheckConstraint("fee_usd >= 0", name="treasury_exec_fee_nonnegative"),
+        CheckConstraint("net_amount_usd > 0", name="treasury_exec_net_positive"),
+        CheckConstraint(
+            "net_amount_usd = gross_amount_usd + fee_usd", name="treasury_exec_net_sum"
+        ),
+        Index("ix_treasury_exec_cell_occurred", "cell_id", "occurred_at"),
+        Index("ix_treasury_exec_instrument", "instrument_id"),
+    )
+    execution_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    target_config_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("cell_treasury_configs.config_id"), nullable=False
+    )
+    instrument_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("instruments.instrument_id"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    shares_executed: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    execution_price_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    gross_amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    fee_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    net_amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    market_snapshot_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("market_snapshots.snapshot_id"), nullable=False
+    )
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TreasuryCashConsumption(Base):
+    __tablename__ = "treasury_cash_consumptions"
+    __table_args__ = (
+        CheckConstraint("consumed_usd > 0", name="treasury_consumed_positive"),
+        Index("ix_treasury_consumptions_alloc", "allocation_id"),
+        Index("ix_treasury_consumptions_exec", "execution_id"),
+    )
+    consumption_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("treasury_executions.execution_id"), nullable=False
+    )
+    allocation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("siphon_allocations.allocation_id"), nullable=False
+    )
+    consumed_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TreasuryRegimeObservation(Base):
+    __tablename__ = "treasury_regime_observations"
+    __table_args__ = (
+        Index("ix_treasury_regime_cell_occurred", "cell_id", "occurred_at"),
+    )
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    gate_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed_metric_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    threshold_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    market_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("market_snapshots.snapshot_id")
+    )
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class OrderIntent(Base):
     __tablename__ = "order_intents"
     __table_args__ = (
