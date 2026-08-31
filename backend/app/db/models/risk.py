@@ -85,7 +85,7 @@ class RiskGovernorState(Base):
         ),
         CheckConstraint(
             "session_net_pnl = session_realized_pnl + session_unrealized_pnl "
-            "- session_fees_usd - session_slippage_usd",
+            "- session_fees_usd",
             name="net_pnl_consistent",
         ),
     )

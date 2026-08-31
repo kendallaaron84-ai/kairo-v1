@@ -8,7 +8,26 @@ from engine.risk.models import FillAccountingEvent, PnLSnapshot, PositionSnapsho
 def net_pnl(
     realized: Decimal, unrealized: Decimal, fees: Decimal, slippage: Decimal
 ) -> Decimal:
-    return realized + unrealized - fees - slippage
+    # Effective fill prices already contain modeled slippage. Keep slippage as
+    # execution-quality telemetry; deducting it here would charge it twice.
+    return realized + unrealized - fees
+
+
+def realized_round_trip_pnl(
+    *,
+    entry_price: Decimal,
+    exit_price: Decimal,
+    quantity: Decimal,
+    contract_multiplier: Decimal,
+    position_side: str,
+) -> Decimal:
+    if position_side == "LONG":
+        price_delta = exit_price - entry_price
+    elif position_side == "SHORT":
+        price_delta = entry_price - exit_price
+    else:
+        raise ValueError("position_side must be LONG or SHORT")
+    return price_delta * quantity * contract_multiplier
 
 
 def apply_fill(snapshot: PnLSnapshot, event: FillAccountingEvent) -> PnLSnapshot:

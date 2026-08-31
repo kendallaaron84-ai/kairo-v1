@@ -1,6 +1,6 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -41,6 +41,7 @@ from engine.risk.models import (
 )
 from engine.risk.pnl_tracker import apply_fill, mark_to_market
 from engine.risk.state_machine import RiskStateMachine
+from engine.execution.virtual_clock import ReplayIdentityFactory, VirtualClock
 
 
 LOSS_LIMIT = Decimal("-6.00")
@@ -56,9 +57,32 @@ EXIT_PURPOSES = {
 class RiskGovernor:
     """Persistent deterministic capital authority; never a broker executor."""
 
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        clock: VirtualClock | None = None,
+        identities: ReplayIdentityFactory | None = None,
+    ):
         self.session = session
-        self.state_machine = RiskStateMachine(session)
+        self.clock = clock
+        self.identities = identities
+        self.state_machine = RiskStateMachine(
+            session, clock=clock, identities=identities
+        )
+
+    def _now(self) -> datetime:
+        return self.clock.now() if self.clock is not None else datetime.now(UTC)
+
+    def _decision_id(self, request: RiskEvaluationRequest) -> UUID:
+        if self.identities is None:
+            return uuid4()
+        return self.identities.generate_id(
+            "risk_decision",
+            request.intent.instrument_id,
+            self._now(),
+            parent_id=request.intent.intent_id,
+        )
 
     def initialize_session(self, spec: RiskSessionSpec) -> RiskGovernorState:
         return self.state_machine.initialize_session(spec)
@@ -136,7 +160,7 @@ class RiskGovernor:
             if reason is DisqualificationReason.NONE
             else DecisionVerdict.REJECTED
         )
-        decision_id = uuid4()
+        decision_id = self._decision_id(request)
         self.session.add(
             RiskDecision(
                 decision_id=decision_id,
@@ -157,6 +181,7 @@ class RiskGovernor:
                     "projected_quantity": str(metrics.projected_quantity),
                     "order_purpose": request.intent.order_purpose.value,
                 },
+                decided_at=self._now(),
             )
         )
         self.session.flush()
@@ -335,12 +360,14 @@ class RiskGovernor:
                 mark_price=mark.mark_price,
                 source_timestamp=mark.source_timestamp,
                 received_at=mark.received_at,
+                updated_at=self._now(),
             )
             self.session.add(persisted)
         elif mark.source_timestamp >= persisted.source_timestamp:
             persisted.mark_price = mark.mark_price
             persisted.source_timestamp = mark.source_timestamp
             persisted.received_at = mark.received_at
+            persisted.updated_at = self._now()
         self.session.flush()
 
         canonical_positions = self._canonical_open_positions()

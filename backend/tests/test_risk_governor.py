@@ -607,7 +607,7 @@ def test_restart_preserves_session_pnl_components(db_session: Session) -> None:
     assert state.session_realized_pnl == Decimal("10")
     assert state.session_fees_usd == Decimal("1")
     assert state.session_slippage_usd == Decimal("0.5")
-    assert state.session_net_pnl == Decimal("8.5")
+    assert state.session_net_pnl == Decimal("9")
 
 
 def test_halted_hard_cannot_be_manually_rearmed(db_session: Session) -> None:
@@ -800,7 +800,7 @@ def test_session_net_pnl_aggregates_all_open_positions(db_session: Session) -> N
 
     state = governor.current_state()
     assert state.session_unrealized_pnl == Decimal("-3")
-    assert state.session_net_pnl == Decimal("5")
+    assert state.session_net_pnl == Decimal("6")
 
 
 def test_aggregate_unrealized_loss_triggers_hard_halt(db_session: Session) -> None:

@@ -29,7 +29,7 @@ def test_pnl_formula_uses_exact_decimal_components() -> None:
             timestamp=datetime.now(UTC),
         ),
     )
-    assert result.net_pnl == Decimal("3.2633333333")
+    assert result.net_pnl == Decimal("3.5033333333")
 
 
 def test_market_mark_derives_age_from_provenance_timestamps() -> None:

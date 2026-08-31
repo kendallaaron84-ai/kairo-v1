@@ -18,6 +18,7 @@ from engine.execution.models import (
     PaperExecutionReceipt,
     SimulatedFillPayload,
 )
+from engine.execution.virtual_clock import ReplayIdentityFactory, VirtualClock
 
 
 class BaseBrokerAdapter(ABC):
@@ -33,10 +34,34 @@ class BaseBrokerAdapter(ABC):
 
 
 class PaperExecutionEngine(BaseBrokerAdapter):
-    def __init__(self, session: Session, config: PaperEngineConfig) -> None:
+    def __init__(
+        self,
+        session: Session,
+        config: PaperEngineConfig,
+        *,
+        clock: VirtualClock | None = None,
+        identities: ReplayIdentityFactory | None = None,
+    ) -> None:
         self.session = session
         self.config = config
+        self.clock = clock
+        self.identities = identities
         self.gate = ExecutionLineageGate(session, config)
+
+    def _now(self) -> datetime:
+        return self.clock.now() if self.clock is not None else datetime.now(UTC)
+
+    def _id(
+        self, record_type: str, instrument_id: UUID, *, parent_id: UUID
+    ) -> UUID:
+        if self.identities is None:
+            return uuid4()
+        return self.identities.generate_id(
+            record_type,
+            instrument_id,
+            self._now(),
+            parent_id=parent_id,
+        )
 
     async def submit_order(
         self, kairo_order_id: UUID, quote: ExecutionQuote
@@ -192,7 +217,11 @@ class PaperExecutionEngine(BaseBrokerAdapter):
             quantity=liquidity.fill_quantity,
             contract_multiplier=context.contract_multiplier,
         )
-        fill_id = uuid4()
+        fill_id = self._id(
+            "fill",
+            context.instrument.instrument_id,
+            parent_id=order.kairo_order_id,
+        )
         metadata = {
             **liquidity.metadata,
             "source": "PAPER_ENGINE",
@@ -219,7 +248,7 @@ class PaperExecutionEngine(BaseBrokerAdapter):
             simulation_policy_version=liquidity.policy_version,
             source_snapshot_id=quote.snapshot_id,
             simulation_metadata=metadata,
-            filled_at=datetime.now(UTC),
+            filled_at=self._now(),
         )
         self.session.add(fill)
         new_cumulative = cumulative + liquidity.fill_quantity
@@ -304,6 +333,7 @@ class PaperExecutionEngine(BaseBrokerAdapter):
             remaining_qty=max(Decimal("0"), target_quantity - cumulative),
             fill_records=payloads,
             observation_payload=observation_payload,
+            timestamp=self._now(),
         )
 
     @staticmethod
@@ -354,16 +384,25 @@ class PaperExecutionEngine(BaseBrokerAdapter):
         status: str,
         payload: dict[str, Any],
     ) -> None:
+        from app.db.models.ledger import OrderIntent
+
+        intent = self.session.get(OrderIntent, order.intent_id)
+        if intent is None:
+            raise RuntimeError("order intent is missing")
         self.session.add(
             OrderObservation(
-                observation_id=uuid4(),
+                observation_id=self._id(
+                    "order_observation",
+                    intent.instrument_id,
+                    parent_id=order.kairo_order_id,
+                ),
                 kairo_order_id=order.kairo_order_id,
                 broker_account_id=self.config.broker_account_id,
                 broker_observation_key=key,
                 broker_order_id=order.broker_order_id or "",
                 event_type=event_type,
                 status=str(status),
-                observed_at=datetime.now(UTC),
+                observed_at=self._now(),
                 payload=payload,
             )
         )

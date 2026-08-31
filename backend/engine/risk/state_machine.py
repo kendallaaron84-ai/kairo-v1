@@ -1,13 +1,19 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.risk import RiskGovernorState, RiskSession, RiskStateEvent
 from engine.risk.exceptions import InvalidStateTransition, RiskSessionNotInitialized
-from engine.risk.models import OperationalState, PnLSnapshot, RiskSessionSpec, TransitionReason
+from engine.execution.virtual_clock import ReplayIdentityFactory, VirtualClock
+from engine.risk.models import (
+    OperationalState,
+    PnLSnapshot,
+    RiskSessionSpec,
+    TransitionReason,
+)
 
 
 ALLOWED_TRANSITIONS: dict[OperationalState, set[OperationalState]] = {
@@ -35,8 +41,29 @@ ALLOWED_TRANSITIONS: dict[OperationalState, set[OperationalState]] = {
 
 
 class RiskStateMachine:
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        clock: VirtualClock | None = None,
+        identities: ReplayIdentityFactory | None = None,
+    ):
         self.session = session
+        self.clock = clock
+        self.identities = identities
+
+    def _now(self) -> datetime:
+        return self.clock.now() if self.clock is not None else datetime.now(UTC)
+
+    def _id(self, record_type: str, parent_id: str) -> UUID:
+        if self.identities is None:
+            return uuid4()
+        return self.identities.generate_id(
+            record_type,
+            UUID(int=0),
+            self._now(),
+            parent_id=parent_id,
+        )
 
     def lock_state(self) -> RiskGovernorState:
         state = self.session.scalar(
@@ -60,6 +87,7 @@ class RiskStateMachine:
                 market_timezone=spec.market_timezone,
                 session_open=spec.session_open,
                 session_close=spec.session_close,
+                created_at=self._now(),
             )
             self.session.add(risk_session)
             self.session.flush()
@@ -77,7 +105,7 @@ class RiskStateMachine:
             if state is not None
             else OperationalState.DISARMED
         )
-        now = datetime.now(UTC)
+        now = self._now()
         if state is None:
             state = RiskGovernorState(
                 singleton_key=1,
@@ -104,13 +132,14 @@ class RiskStateMachine:
             state.updated_at = now
         self.session.add(
             RiskStateEvent(
-                event_id=uuid4(),
+                event_id=self._id("risk_state_event", spec.session_id),
                 session_id=spec.session_id,
                 previous_state=previous.value,
                 new_state=OperationalState.DISARMED.value,
                 trigger_reason=TransitionReason.SESSION_INITIALIZED.value,
                 current_session_net_pnl=Decimal("0"),
                 authorized_cash_usd=Decimal("0"),
+                recorded_at=now,
             )
         )
         self.session.flush()
@@ -129,15 +158,16 @@ class RiskStateMachine:
         if new_state not in ALLOWED_TRANSITIONS[previous]:
             raise InvalidStateTransition(f"{previous.value} cannot transition to {new_state.value}")
         event = RiskStateEvent(
-            event_id=uuid4(),
+            event_id=self._id("risk_state_event", state.current_session_id),
             session_id=state.current_session_id,
             previous_state=previous.value,
             new_state=new_state.value,
             trigger_reason=reason.value,
             current_session_net_pnl=state.session_net_pnl,
             authorized_cash_usd=authorized_cash_usd,
+            recorded_at=self._now(),
         )
-        now = datetime.now(UTC)
+        now = self._now()
         self.session.add(event)
         state.operational_state = new_state.value
         state.last_state_change_at = now
@@ -160,5 +190,5 @@ class RiskStateMachine:
         state.session_fees_usd = snapshot.fees_usd
         state.session_slippage_usd = snapshot.slippage_usd
         state.session_net_pnl = snapshot.net_pnl
-        state.updated_at = datetime.now(UTC)
+        state.updated_at = self._now()
         self.session.flush()
