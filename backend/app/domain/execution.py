@@ -65,6 +65,16 @@ class FillFact(BaseModel):
     side: OrderSide
     quantity: Decimal = Field(gt=0)
     price: Decimal = Field(gt=0)
+    reference_price: Decimal | None = Field(default=None, gt=0)
+    contract_multiplier: Decimal | None = Field(default=None, gt=0)
+    slippage_usd: Decimal | None = Field(default=None, ge=0)
+    commission_fee_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    is_simulated: bool = False
+    liquidity_fidelity_tier: str | None = None
+    simulation_model: str | None = None
+    simulation_policy_version: str | None = None
+    source_snapshot_id: UUID | None = None
+    simulation_metadata: dict = Field(default_factory=dict)
     filled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -83,6 +93,7 @@ class KairoOrderFact(BaseModel):
 
     kairo_order_id: UUID = Field(default_factory=uuid4)
     intent_id: UUID
+    risk_decision_id: UUID | None = None
     broker_account_id: UUID
     broker_order_id: str | None = None
     status: str

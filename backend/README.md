@@ -57,5 +57,12 @@ canonical option resolution without adding execution or broker behavior.
 Registry lifecycle `status = ACTIVE` only makes this immutable version selectable; it does not
 override `configuration.clearance = PAPER_ONLY` or grant execution authority.
 
+Migration `0008` adds explicit Kairo-order-to-risk-decision lineage and audit-complete simulated
+fill fields. Paper executions persist canonical multiplier, reference price, slippage, source
+snapshot, liquidity fidelity, simulation model, and versioned policy metadata. The conservative
+`TIER_3_BAR_ONLY` policy uses adverse bar extremes, never treats bar volume as depth, and records
+that its coarse full-fill outcome is a non-guaranteed hypothesis with no inferred queue position
+or partial-fill capacity.
+
 Phase 2C does not include broker integration, execution, Strategy 001 runtime, WebSockets, or UI
 visualization work.

@@ -113,6 +113,7 @@ class OrderIntent(Base):
 class RiskDecision(Base):
     __tablename__ = "risk_decisions"
     __table_args__ = (
+        UniqueConstraint("decision_id", "intent_id", name="uq_risk_decisions_decision_intent"),
         Index("ix_risk_decisions_session_decided", "session_id", "decided_at"),
     )
     decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -137,12 +138,18 @@ class KairoOrder(Base):
     __tablename__ = "kairo_orders"
     __table_args__ = (
         UniqueConstraint("intent_id", name="uq_kairo_orders_intent_id"),
+        ForeignKeyConstraint(
+            ["risk_decision_id", "intent_id"],
+            ["risk_decisions.decision_id", "risk_decisions.intent_id"],
+            name="fk_kairo_orders_risk_decision_intent",
+        ),
         Index("ix_kairo_orders_intent_id", "intent_id"),
     )
     kairo_order_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     intent_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("order_intents.intent_id"), nullable=False
     )
+    risk_decision_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     broker_account_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("broker_accounts.broker_account_id"), nullable=False)
     broker_order_id: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -171,6 +178,16 @@ class Fill(Base):
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_fills_positive_quantity"),
         CheckConstraint("price > 0", name="ck_fills_positive_price"),
+        CheckConstraint(
+            "commission_fee_usd >= 0 AND "
+            "(is_simulated = false OR (reference_price > 0 "
+            "AND contract_multiplier > 0 AND slippage_usd >= 0 "
+            "AND liquidity_fidelity_tier IN ('TIER_1_QUOTE_DEPTH', "
+            "'TIER_2_TRADE_HISTORY', 'TIER_3_BAR_ONLY') "
+            "AND simulation_model IS NOT NULL "
+            "AND simulation_policy_version IS NOT NULL))",
+            name="simulated_execution_metadata",
+        ),
         UniqueConstraint("broker_account_id", "broker_fill_id", name="uq_fills_broker_fill"),
         Index("ix_fills_kairo_order_filled", "kairo_order_id", "filled_at"),
         Index("ix_fills_broker_account_filled", "broker_account_id", "filled_at"),
@@ -183,6 +200,20 @@ class Fill(Base):
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(28, 10))
+    contract_multiplier: Mapped[Decimal | None] = mapped_column(Numeric(28, 10))
+    slippage_usd: Mapped[Decimal | None] = mapped_column(Numeric(28, 10))
+    commission_fee_usd: Mapped[Decimal] = mapped_column(
+        Numeric(28, 10), nullable=False, default=0
+    )
+    is_simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    liquidity_fidelity_tier: Mapped[str | None] = mapped_column(String(32))
+    simulation_model: Mapped[str | None] = mapped_column(String(64))
+    simulation_policy_version: Mapped[str | None] = mapped_column(String(64))
+    source_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("market_snapshots.snapshot_id")
+    )
+    simulation_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
