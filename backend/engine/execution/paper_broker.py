@@ -197,6 +197,7 @@ class PaperExecutionEngine(BaseBrokerAdapter):
             **liquidity.metadata,
             "source": "PAPER_ENGINE",
             "synthetic": True,
+            "execution_guaranteed": False,
             "liquidity_fidelity_tier": quote.fidelity_tier.value,
         }
         fill = Fill(

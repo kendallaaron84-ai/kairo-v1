@@ -64,5 +64,9 @@ snapshot, liquidity fidelity, simulation model, and versioned policy metadata. T
 that its coarse full-fill outcome is a non-guaranteed hypothesis with no inferred queue position
 or partial-fill capacity.
 
+Migration `0009` makes simulated-fill provenance a PostgreSQL invariant: every simulated fill must
+reference a persisted market snapshot and carry complete pricing, multiplier, slippage, fidelity,
+versioned-policy, and synthetic metadata, including an explicit execution-guarantee field.
+
 Phase 2C does not include broker integration, execution, Strategy 001 runtime, WebSockets, or UI
 visualization work.

@@ -5,7 +5,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models.broker import BrokerAccount
@@ -248,6 +249,32 @@ def engine(
     )
 
 
+def direct_simulated_fill_values(context: Context) -> dict:
+    return {
+        "fill_id": uuid4(),
+        "kairo_order_id": context.order.kairo_order_id,
+        "broker_account_id": context.broker.broker_account_id,
+        "broker_fill_id": f"direct-{uuid4()}",
+        "instrument_id": context.instrument.instrument_id,
+        "side": context.intent.side,
+        "quantity": Decimal("1"),
+        "price": Decimal("10.01"),
+        "reference_price": Decimal("10.00"),
+        "contract_multiplier": context.instrument.contract_multiplier,
+        "slippage_usd": Decimal("1.00"),
+        "commission_fee_usd": Decimal("0"),
+        "is_simulated": True,
+        "liquidity_fidelity_tier": "TIER_1_QUOTE_DEPTH",
+        "simulation_model": "PAPER-FILL-v0.1",
+        "simulation_policy_version": "QUOTE-DEPTH-v0.1",
+        "source_snapshot_id": context.snapshot.snapshot_id,
+        "simulation_metadata": {
+            "synthetic": True,
+            "execution_guaranteed": False,
+        },
+    }
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -463,3 +490,44 @@ def test_duplicate_fill_idempotency_prevents_double_persistence(
     )
     assert first.cumulative_filled_qty == second.cumulative_filled_qty == Decimal("1")
     assert count == 1
+
+
+def test_direct_simulated_fill_without_source_snapshot_is_rejected(
+    db_session: Session,
+) -> None:
+    context = seed_context(db_session)
+    values = direct_simulated_fill_values(context)
+    values["source_snapshot_id"] = None
+    with pytest.raises(IntegrityError):
+        db_session.execute(insert(Fill).values(**values))
+
+
+def test_direct_simulated_fill_without_synthetic_true_is_rejected(
+    db_session: Session,
+) -> None:
+    context = seed_context(db_session)
+    values = direct_simulated_fill_values(context)
+    values["simulation_metadata"] = {"execution_guaranteed": False}
+    with pytest.raises(IntegrityError):
+        db_session.execute(insert(Fill).values(**values))
+
+
+def test_direct_simulated_fill_without_execution_guaranteed_is_rejected(
+    db_session: Session,
+) -> None:
+    context = seed_context(db_session)
+    values = direct_simulated_fill_values(context)
+    values["simulation_metadata"] = {"synthetic": True}
+    with pytest.raises(IntegrityError):
+        db_session.execute(insert(Fill).values(**values))
+
+
+def test_direct_complete_simulated_fill_succeeds(db_session: Session) -> None:
+    context = seed_context(db_session)
+    values = direct_simulated_fill_values(context)
+    db_session.execute(insert(Fill).values(**values))
+    persisted = db_session.get(Fill, values["fill_id"])
+    assert persisted is not None
+    assert persisted.source_snapshot_id == context.snapshot.snapshot_id
+    assert persisted.simulation_metadata["synthetic"] is True
+    assert persisted.simulation_metadata["execution_guaranteed"] is False
