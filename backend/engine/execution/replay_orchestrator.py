@@ -285,7 +285,7 @@ class ReplayOrchestrator:
                         completed_close=completed.close if completed else None,
                         lineage=lineage,
                         source_payload={
-                            "sampled_price": str(observation.price),
+                            "sampled_price": _decimal_text(observation.price),
                             "completed_minute_start": (
                                 completed.minute_start.isoformat() if completed else None
                             ),
@@ -454,7 +454,7 @@ class ReplayOrchestrator:
                     "exact_prototype_replay": event.lineage.exact_prototype_replay,
                     "transformation": event.lineage.transformation,
                     "completed_close": (
-                        str(event.completed_close)
+                        _decimal_text(event.completed_close)
                         if event.completed_close is not None
                         else None
                     ),
@@ -492,12 +492,12 @@ class ReplayOrchestrator:
                     ),
                     payload={
                         "source": "REPLAY_OPTION_CHAIN",
-                        "bid_size": str(candidate.bid_size),
-                        "ask_size": str(candidate.ask_size),
+                        "bid_size": _decimal_text(candidate.bid_size),
+                        "ask_size": _decimal_text(candidate.ask_size),
                         "volume": candidate.volume,
                         "open_interest": candidate.open_interest,
                         "expiration_date": candidate.expiration_date.isoformat(),
-                        "strike_price": str(candidate.strike_price),
+                        "strike_price": _decimal_text(candidate.strike_price),
                         "option_right": candidate.option_right.value,
                     },
                 )
@@ -932,7 +932,7 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return str(value)
+        return _decimal_text(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, dict):
@@ -940,3 +940,14 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     return value
+
+
+def _decimal_text(value: Decimal) -> str:
+    """Canonical plain-decimal text independent of PostgreSQL NUMERIC scale."""
+
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
