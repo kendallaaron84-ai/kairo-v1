@@ -116,7 +116,9 @@ def allocation(
         unallocated_cash_balance_usd=amount,
         occurred_at=siphon.occurred_at,
     )
-    session.add_all([siphon, row])
+    session.add(siphon)
+    session.flush()
+    session.add(row)
     session.flush()
     return row
 
@@ -153,7 +155,10 @@ def live_allocation(
         bucket_type="TARGET_TREASURY", allocated_usd=amount,
         unallocated_cash_balance_usd=amount, occurred_at=siphon.occurred_at,
     )
-    session.add_all([siphon, row]); session.flush()
+    session.add(siphon)
+    session.flush()
+    session.add(row)
+    session.flush()
     return row
 
 

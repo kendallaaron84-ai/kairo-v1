@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -69,6 +70,7 @@ class OwnershipTreasuryHolding(Base):
         UniqueConstraint(
             "cell_id", "instrument_id", "is_synthetic", name="uq_cell_instrument_holding"
         ),
+        Index("ix_ownership_treasury_holdings_cell", "cell_id"),
     )
     holding_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     treasury_code: Mapped[str] = mapped_column(String(50), nullable=False)
