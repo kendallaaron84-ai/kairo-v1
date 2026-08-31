@@ -271,7 +271,7 @@ def test_cash_snapshot_preserves_settlement_distinctions_and_authorization_linea
     db_session.flush()
     authorization = KairoCapitalAuthorizationRecord(
         authorization_id=uuid4(),
-        cell_id=uuid4(),
+        cell_id=add_cell(db_session).cell_id,
         broker_snapshot_id=snapshot.snapshot_id,
         broker_account_id=broker.broker_account_id,
         settled_cash=Decimal("100.00"),
@@ -307,7 +307,7 @@ def test_capital_authorization_rejects_snapshot_account_mismatch(
     db_session.add(
         KairoCapitalAuthorizationRecord(
             authorization_id=uuid4(),
-            cell_id=uuid4(),
+            cell_id=add_cell(db_session).cell_id,
             broker_snapshot_id=snapshot.snapshot_id,
             broker_account_id=other_broker.broker_account_id,
             settled_cash=Decimal("100"),

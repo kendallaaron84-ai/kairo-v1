@@ -85,6 +85,7 @@ def seed_context(
     can_fractional: bool = True,
     strategy_clearance: str = "LIVE",
     seed_capital: Decimal = Decimal("1000"),
+    existing_cell: CapitalCell | None = None,
 ) -> SeededContext:
     broker = BrokerAccount(
         broker_account_id=uuid4(),
@@ -111,27 +112,36 @@ def seed_context(
         currency="USD",
         **instrument_kwargs,
     )
-    strategy = StrategyRegistry(
-        strategy_id=f"STRAT-{uuid4().hex[:8]}",
-        version_tag="1.0.0",
-        display_name="Risk test strategy",
-        status="ACTIVE",
-        configuration={"clearance": strategy_clearance},
-    )
-    cell = CapitalCell(
-        cell_id=uuid4(),
-        cell_code=f"CELL-{uuid4().hex[:8]}",
-        seed_capital=seed_capital,
-        status="ACTIVE",
-        autonomy_tier="APPRENTICE",
-        strategy_id=strategy.strategy_id,
-        strategy_version=strategy.version_tag,
-        target_treasury_code="META",
-    )
-    session.add_all([broker, instrument, strategy])
+    if existing_cell is None:
+        strategy = StrategyRegistry(
+            strategy_id=f"STRAT-{uuid4().hex[:8]}",
+            version_tag="1.0.0",
+            display_name="Risk test strategy",
+            status="ACTIVE",
+            configuration={"clearance": strategy_clearance},
+        )
+        cell = CapitalCell(
+            cell_id=uuid4(),
+            cell_code=f"CELL-{uuid4().hex[:8]}",
+            seed_capital=seed_capital,
+            status="ACTIVE",
+            autonomy_tier="APPRENTICE",
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version_tag,
+            target_treasury_code="META",
+        )
+        session.add(strategy)
+    else:
+        cell = existing_cell
+        strategy = session.get(
+            StrategyRegistry, (cell.strategy_id, cell.strategy_version)
+        )
+        assert strategy is not None
+    session.add_all([broker, instrument])
     session.flush()
-    session.add(cell)
-    session.flush()
+    if existing_cell is None:
+        session.add(cell)
+        session.flush()
     capability = BrokerInstrumentCapability(
         capability_id=uuid4(),
         broker_account_id=broker.broker_account_id,
@@ -350,7 +360,9 @@ def test_stale_data_blocks_entry_but_not_emergency_exit(db_session: Session) -> 
     entry = governor.evaluate(make_request(db_session, entry_context, age_seconds=Decimal("2")))
     assert entry.reason is DisqualificationReason.MARKET_DATA_STALE
 
-    exit_context = seed_context(db_session, position_quantity=Decimal("1"))
+    exit_context = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=entry_context.cell
+    )
     exit_result = governor.evaluate(
         make_request(
             db_session,
@@ -413,7 +425,9 @@ def test_new_session_does_not_auto_arm(db_session: Session) -> None:
 
 def test_manual_pause_blocks_entries_but_preserves_exit_authority(db_session: Session) -> None:
     entry_context = seed_context(db_session)
-    exit_context = seed_context(db_session, position_quantity=Decimal("1"))
+    exit_context = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=entry_context.cell
+    )
     governor = initialize_governor(db_session)
     governor.halt_trading(authorized_cash_usd=Decimal("100"))
     entry = governor.evaluate(make_request(db_session, entry_context))
@@ -781,7 +795,9 @@ def test_multi_instrument_marks_preserve_other_instrument_unrealized_pnl(
     db_session: Session,
 ) -> None:
     first = seed_context(db_session, position_quantity=Decimal("1"))
-    second = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=first.cell
+    )
     positions = [position_snapshot(first), position_snapshot(second)]
     governor = initialize_governor(db_session)
 
@@ -793,7 +809,9 @@ def test_multi_instrument_marks_preserve_other_instrument_unrealized_pnl(
 
 def test_session_net_pnl_aggregates_all_open_positions(db_session: Session) -> None:
     first = seed_context(db_session, position_quantity=Decimal("1"))
-    second = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=first.cell
+    )
     positions = [position_snapshot(first), position_snapshot(second)]
     governor = initialize_governor(db_session)
     governor.record_fill_accounting(
@@ -811,7 +829,9 @@ def test_session_net_pnl_aggregates_all_open_positions(db_session: Session) -> N
 
 def test_aggregate_unrealized_loss_triggers_hard_halt(db_session: Session) -> None:
     first = seed_context(db_session, position_quantity=Decimal("1"))
-    second = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=first.cell
+    )
     positions = [position_snapshot(first), position_snapshot(second)]
     governor = initialize_governor(db_session)
 
@@ -829,7 +849,9 @@ def test_new_mark_for_one_instrument_does_not_erase_other_positions(
     db_session: Session,
 ) -> None:
     first = seed_context(db_session, position_quantity=Decimal("1"))
-    second = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=first.cell
+    )
     positions = [position_snapshot(first), position_snapshot(second)]
     governor = initialize_governor(db_session)
     record_portfolio_mark(governor, first, "12", positions)
@@ -844,7 +866,9 @@ def test_persisted_portfolio_marks_survive_governor_restart(
     db_session: Session,
 ) -> None:
     first = seed_context(db_session, position_quantity=Decimal("1"))
-    second = seed_context(db_session, position_quantity=Decimal("1"))
+    second = seed_context(
+        db_session, position_quantity=Decimal("1"), existing_cell=first.cell
+    )
     positions = [position_snapshot(first), position_snapshot(second)]
     governor = initialize_governor(db_session)
     record_portfolio_mark(governor, first, "12", positions)

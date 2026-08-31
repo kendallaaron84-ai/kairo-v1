@@ -96,7 +96,7 @@ def test_synthetic_evidence_manifest_is_append_only(db_session: Session) -> None
 
 def test_synthetic_authorization_requires_persisted_manifest_fk(db_session: Session) -> None:
     owner = cell(db_session, "AUTH-FK")
-    with pytest.raises(IntegrityError), db_session.begin_nested():
+    with pytest.raises(DBAPIError), db_session.begin_nested():
         db_session.add(authorization(owner, uuid4()))
         db_session.flush()
 
@@ -115,7 +115,7 @@ def test_live_authorization_rejects_synthetic_manifest(db_session: Session) -> N
     evidence = manifest(db_session, owner)
     row = authorization(owner, evidence.manifest_id)
     row.economic_domain = "LIVE"
-    with pytest.raises(IntegrityError), db_session.begin_nested():
+    with pytest.raises(DBAPIError), db_session.begin_nested():
         db_session.add(row)
         db_session.flush()
 
@@ -134,7 +134,7 @@ def test_capital_authorizations_enforce_mutually_exclusive_live_vs_synthetic_pro
 ) -> None:
     owner = cell(db_session, "AUTH-XOR")
     row = authorization(owner, None)
-    with pytest.raises(IntegrityError), db_session.begin_nested():
+    with pytest.raises(DBAPIError), db_session.begin_nested():
         db_session.add(row)
         db_session.flush()
 

@@ -16,19 +16,34 @@ def test_runtime_role_preserves_risk_event_immutability_and_projection_control(
     admin_url, runtime_url = migrated_database
     session_id = f"permission-{uuid4()}"
     event_id = uuid4()
+    cell_id = uuid4()
     now = datetime.now(UTC)
     runtime_engine = create_engine(runtime_url)
     admin_engine = create_engine(admin_url)
     try:
+        with admin_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO capital_cells "
+                    "(cell_id, cell_code, seed_capital, status, autonomy_tier, "
+                    "strategy_id, strategy_version, target_treasury_code, "
+                    "risk_policy_id, economic_domain) VALUES "
+                    "(:cell_id, :cell_code, 100, 'ACTIVE', 'APPRENTICE', "
+                    "'EMA-CROSS-001', '1.0.0', 'META', "
+                    "'a0000000-0000-0000-0000-000000000001', 'LIVE')"
+                ),
+                {"cell_id": cell_id, "cell_code": f"PERM-{cell_id.hex[:8]}"},
+            )
         with runtime_engine.begin() as connection:
             connection.execute(
                 text(
                     "INSERT INTO risk_sessions "
-                    "(session_id, trading_date, session_open, session_close) "
-                    "VALUES (:session_id, :trading_date, :session_open, :session_close)"
+                    "(session_id, cell_id, trading_date, session_open, session_close) "
+                    "VALUES (:session_id, :cell_id, :trading_date, :session_open, :session_close)"
                 ),
                 {
                     "session_id": session_id,
+                    "cell_id": cell_id,
                     "trading_date": date.today(),
                     "session_open": now,
                     "session_close": now + timedelta(hours=6),
@@ -37,26 +52,27 @@ def test_runtime_role_preserves_risk_event_immutability_and_projection_control(
             connection.execute(
                 text(
                     "INSERT INTO risk_state_events "
-                    "(event_id, session_id, previous_state, new_state, trigger_reason, "
+                    "(event_id, session_id, cell_id, previous_state, new_state, trigger_reason, "
                     "current_session_net_pnl, authorized_cash_usd) "
-                    "VALUES (:event_id, :session_id, 'DISARMED', 'DISARMED', "
+                    "VALUES (:event_id, :session_id, :cell_id, 'DISARMED', 'DISARMED', "
                     "'PERMISSION_TEST', 0, 0)"
                 ),
-                {"event_id": event_id, "session_id": session_id},
+                {"event_id": event_id, "session_id": session_id, "cell_id": cell_id},
             )
             connection.execute(
                 text(
                     "INSERT INTO risk_governor_state "
-                    "(singleton_key, current_session_id, operational_state) "
-                    "VALUES (1, :session_id, 'DISARMED')"
+                    "(cell_id, current_session_id, operational_state) "
+                    "VALUES (:cell_id, :session_id, 'DISARMED')"
                 ),
-                {"session_id": session_id},
+                {"session_id": session_id, "cell_id": cell_id},
             )
         with runtime_engine.begin() as connection:
             connection.execute(
                 text(
-                    "UPDATE risk_governor_state SET updated_at=now() WHERE singleton_key=1"
+                    "UPDATE risk_governor_state SET updated_at=now() WHERE cell_id=:cell_id"
                 )
+                , {"cell_id": cell_id}
             )
         with runtime_engine.connect() as connection:
             assert connection.scalar(
@@ -77,7 +93,8 @@ def test_runtime_role_preserves_risk_event_immutability_and_projection_control(
         with pytest.raises(DBAPIError):
             with runtime_engine.begin() as connection:
                 connection.execute(
-                    text("DELETE FROM risk_governor_state WHERE singleton_key=1")
+                    text("DELETE FROM risk_governor_state WHERE cell_id=:cell_id"),
+                    {"cell_id": cell_id},
                 )
         with pytest.raises(DBAPIError):
             with runtime_engine.begin() as connection:
@@ -116,12 +133,19 @@ def test_runtime_role_preserves_risk_event_immutability_and_projection_control(
             ) is False
     finally:
         with admin_engine.begin() as connection:
-            connection.execute(text("DELETE FROM risk_governor_state WHERE singleton_key=1"))
+            connection.execute(
+                text("DELETE FROM risk_governor_state WHERE cell_id=:cell_id"),
+                {"cell_id": cell_id},
+            )
             connection.execute(
                 text("DELETE FROM risk_state_events WHERE event_id=:id"), {"id": event_id}
             )
             connection.execute(
                 text("DELETE FROM risk_sessions WHERE session_id=:id"), {"id": session_id}
+            )
+            connection.execute(
+                text("DELETE FROM capital_cells WHERE cell_id=:cell_id"),
+                {"cell_id": cell_id},
             )
         runtime_engine.dispose()
         admin_engine.dispose()
