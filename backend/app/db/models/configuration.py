@@ -63,6 +63,22 @@ class TrustPolicy(Base):
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RiskPolicy(Base):
+    __tablename__ = "risk_policies"
+    __table_args__ = (
+        CheckConstraint("daily_loss_floor_usd < 0", name="loss_floor_negative"),
+        CheckConstraint("daily_profit_lock_usd > 0", name="profit_lock_positive"),
+        CheckConstraint("market_stale_seconds > 0", name="stale_seconds_positive"),
+    )
+
+    policy_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    policy_identifier: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    daily_loss_floor_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    daily_profit_lock_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    market_stale_seconds: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CellTreasuryConfig(Base):
     __tablename__ = "cell_treasury_configs"
     __table_args__ = (

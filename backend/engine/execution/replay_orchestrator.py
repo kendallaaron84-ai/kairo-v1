@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
@@ -20,6 +21,7 @@ from app.db.models.ledger import (
     OrderIntent,
     OrderObservation,
     RiskDecision,
+    SyntheticEvidenceManifest,
 )
 from app.db.models.projections import CurrentPosition
 from app.db.models.risk import (
@@ -175,6 +177,7 @@ class ReplayRunResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     manifest_hash: str
+    manifest_id: UUID
     financial_ids: tuple[UUID, ...]
     event_count: int
     lineage: tuple[MarketDataLineage, ...]
@@ -226,7 +229,7 @@ class ReplayOrchestrator:
         self.clock = VirtualClock(config.session_open)
         self.identities = ReplayIdentityFactory(config.session_id)
         self.governor = RiskGovernor(
-            session, clock=self.clock, identities=self.identities
+            session, cell_id=config.cell_id, clock=self.clock, identities=self.identities
         )
         self.paper = PaperExecutionEngine(
             session,
@@ -346,12 +349,39 @@ class ReplayOrchestrator:
         for event in sorted(events, key=lambda item: (item.timestamp, item.stable_order)):
             self._process_event(event)
         manifest_hash, ids = self.build_manifest()
+        manifest_id = self._persist_manifest(manifest_hash, ids)
         return ReplayRunResult(
             manifest_hash=manifest_hash,
+            manifest_id=manifest_id,
             financial_ids=ids,
             event_count=self._event_count,
             lineage=tuple(lineages),
         )
+
+    def _persist_manifest(self, manifest_hash: str, ids: tuple[UUID, ...]) -> UUID:
+        identity = (
+            f"kairo:synthetic-evidence:REPLAY_RUN:{self.config.cell_id}:"
+            f"{self.config.session_id}:{manifest_hash}"
+        )
+        manifest_id = uuid5(NAMESPACE_URL, identity)
+        existing = self.session.get(SyntheticEvidenceManifest, manifest_id)
+        values = {
+            "manifest_type": "REPLAY_RUN",
+            "manifest_hash": manifest_hash,
+            "manifest_algorithm": "REPLAY-MANIFEST-v1",
+            "cell_id": self.config.cell_id,
+            "source_count": len(ids),
+            "source_refs": {"financial_ids": [str(item) for item in ids]},
+            "model_identifier": self.config.strategy_id,
+            "model_version": self.config.strategy_version,
+            "created_at": self.config.session_close,
+        }
+        if existing is None:
+            self.session.add(SyntheticEvidenceManifest(manifest_id=manifest_id, **values))
+            self.session.flush()
+        elif any(getattr(existing, key) != value for key, value in values.items()):
+            raise ValueError("deterministic manifest identity conflicts with persisted evidence")
+        return manifest_id
 
     @staticmethod
     def _require_aware(timestamp: datetime) -> None:
@@ -931,7 +961,7 @@ class ReplayOrchestrator:
                     "risk_sessions",
                     [self.session.get(RiskSession, self.config.session_id)],
                 ),
-                ("risk_governor_state", [self.session.get(RiskGovernorState, 1)]),
+                ("risk_governor_state", [self.session.get(RiskGovernorState, self.config.cell_id)]),
             ]
         )
         manifest: list[dict[str, Any]] = []

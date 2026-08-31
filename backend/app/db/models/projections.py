@@ -40,6 +40,10 @@ class CapitalCell(Base):
             "autonomy_tier IN ('APPRENTICE', 'GUARDED', 'CAPITAL_BUILDER')",
             name="valid_autonomy_tier",
         ),
+        CheckConstraint(
+            "economic_domain IN ('LIVE', 'SYNTHETIC', 'LEGACY_MIXED')",
+            name="economic_domain",
+        ),
     )
     cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     cell_code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
@@ -51,6 +55,15 @@ class CapitalCell(Base):
     strategy_id: Mapped[str] = mapped_column(String(100), nullable=False)
     strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
     target_treasury_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    risk_policy_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("risk_policies.policy_id"),
+        nullable=False,
+        default=UUID("a0000000-0000-0000-0000-000000000001"),
+    )
+    economic_domain: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="LIVE"
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 

@@ -115,6 +115,7 @@ def seed_context(
     )
     risk_session = RiskSession(
         session_id=f"paper-session-{uuid4()}",
+        cell_id=cell.cell_id,
         trading_date=date.today(),
         session_open=datetime.now(UTC) - timedelta(hours=1),
         session_close=datetime.now(UTC) + timedelta(hours=6),

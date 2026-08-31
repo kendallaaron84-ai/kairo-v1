@@ -10,6 +10,7 @@ EXPECTED_TABLES = {
     "broker_instrument_capabilities",
     "strategy_registry",
     "trust_policies",
+    "risk_policies",
     "cell_events",
     "market_snapshots",
     "siphon_events",
@@ -35,6 +36,7 @@ EXPECTED_TABLES = {
     "treasury_executions",
     "treasury_cash_consumptions",
     "treasury_regime_observations",
+    "synthetic_evidence_manifests",
 }
 
 

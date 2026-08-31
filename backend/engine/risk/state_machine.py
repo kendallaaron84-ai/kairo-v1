@@ -45,10 +45,12 @@ class RiskStateMachine:
         self,
         session: Session,
         *,
+        cell_id: UUID,
         clock: VirtualClock | None = None,
         identities: ReplayIdentityFactory | None = None,
     ):
         self.session = session
+        self.cell_id = cell_id
         self.clock = clock
         self.identities = identities
 
@@ -60,7 +62,7 @@ class RiskStateMachine:
             return uuid4()
         return self.identities.generate_id(
             record_type,
-            UUID(int=0),
+            self.cell_id,
             self._now(),
             parent_id=parent_id,
         )
@@ -68,7 +70,7 @@ class RiskStateMachine:
     def lock_state(self) -> RiskGovernorState:
         state = self.session.scalar(
             select(RiskGovernorState)
-            .where(RiskGovernorState.singleton_key == 1)
+            .where(RiskGovernorState.cell_id == self.cell_id)
             .with_for_update()
         )
         if state is None:
@@ -76,13 +78,16 @@ class RiskStateMachine:
         return state
 
     def current_state(self) -> RiskGovernorState | None:
-        return self.session.get(RiskGovernorState, 1)
+        return self.session.get(RiskGovernorState, self.cell_id)
 
     def initialize_session(self, spec: RiskSessionSpec) -> RiskGovernorState:
         risk_session = self.session.get(RiskSession, spec.session_id)
+        if risk_session is not None and risk_session.cell_id != self.cell_id:
+            raise RiskSessionNotInitialized("risk session belongs to another cell")
         if risk_session is None:
             risk_session = RiskSession(
                 session_id=spec.session_id,
+                cell_id=self.cell_id,
                 trading_date=spec.trading_date,
                 market_timezone=spec.market_timezone,
                 session_open=spec.session_open,
@@ -94,7 +99,7 @@ class RiskStateMachine:
 
         state = self.session.scalar(
             select(RiskGovernorState)
-            .where(RiskGovernorState.singleton_key == 1)
+            .where(RiskGovernorState.cell_id == self.cell_id)
             .with_for_update()
         )
         if state is not None and state.current_session_id == spec.session_id:
@@ -108,7 +113,7 @@ class RiskStateMachine:
         now = self._now()
         if state is None:
             state = RiskGovernorState(
-                singleton_key=1,
+                cell_id=self.cell_id,
                 current_session_id=spec.session_id,
                 operational_state=OperationalState.DISARMED.value,
                 session_realized_pnl=Decimal("0"),
@@ -134,6 +139,7 @@ class RiskStateMachine:
             RiskStateEvent(
                 event_id=self._id("risk_state_event", spec.session_id),
                 session_id=spec.session_id,
+                cell_id=self.cell_id,
                 previous_state=previous.value,
                 new_state=OperationalState.DISARMED.value,
                 trigger_reason=TransitionReason.SESSION_INITIALIZED.value,
@@ -160,6 +166,7 @@ class RiskStateMachine:
         event = RiskStateEvent(
             event_id=self._id("risk_state_event", state.current_session_id),
             session_id=state.current_session_id,
+            cell_id=self.cell_id,
             previous_state=previous.value,
             new_state=new_state.value,
             trigger_reason=reason.value,

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.broker import BrokerInstrumentCapability
-from app.db.models.configuration import Instrument, StrategyRegistry
+from app.db.models.configuration import Instrument, RiskPolicy, StrategyRegistry
 from app.db.models.ledger import KairoCapitalAuthorizationRecord, OrderIntent, RiskDecision
 from app.db.models.projections import CapitalCell, CurrentPosition
 from app.db.models.risk import RiskGovernorState, RiskInstrumentMark, RiskStateEvent
@@ -44,9 +44,6 @@ from engine.risk.state_machine import RiskStateMachine
 from engine.execution.virtual_clock import ReplayIdentityFactory, VirtualClock
 
 
-LOSS_LIMIT = Decimal("-6.00")
-PROFIT_CEILING = Decimal("20.00")
-MAX_QUOTE_AGE = timedelta(seconds=1.5)
 EXIT_PURPOSES = {
     OrderPurpose.TAKE_PROFIT,
     OrderPurpose.STOP_LOSS,
@@ -61,15 +58,35 @@ class RiskGovernor:
         self,
         session: Session,
         *,
+        cell_id: UUID,
         clock: VirtualClock | None = None,
         identities: ReplayIdentityFactory | None = None,
     ):
         self.session = session
+        self.cell_id = cell_id
         self.clock = clock
         self.identities = identities
+        cell = self.session.get(CapitalCell, cell_id)
+        if cell is None:
+            raise RiskGovernorError(f"capital cell {cell_id} does not exist")
+        self.policy = self.session.get(RiskPolicy, cell.risk_policy_id)
+        if self.policy is None:
+            raise RiskGovernorError(f"cell {cell_id} has no resolvable risk policy")
         self.state_machine = RiskStateMachine(
-            session, clock=clock, identities=identities
+            session, cell_id=cell_id, clock=clock, identities=identities
         )
+
+    @property
+    def loss_limit(self) -> Decimal:
+        return self.policy.daily_loss_floor_usd
+
+    @property
+    def profit_ceiling(self) -> Decimal:
+        return self.policy.daily_profit_lock_usd
+
+    @property
+    def max_quote_age(self) -> timedelta:
+        return timedelta(seconds=float(self.policy.market_stale_seconds))
 
     def _now(self) -> datetime:
         return self.clock.now() if self.clock is not None else datetime.now(UTC)
@@ -219,7 +236,7 @@ class RiskGovernor:
             StrategyRegistry, (intent.strategy_id, intent.strategy_version)
         )
         cell = self.session.get(CapitalCell, intent.cell_id)
-        if instrument is None or cell is None:
+        if instrument is None or cell is None or intent.cell_id != self.cell_id:
             return request, DisqualificationReason.POSITION_IDENTITY_MISMATCH
         if request.market_mark.instrument_id != intent.instrument_id:
             return request, DisqualificationReason.POSITION_IDENTITY_MISMATCH
@@ -404,6 +421,7 @@ class RiskGovernor:
             select(CurrentPosition, Instrument)
             .join(Instrument, Instrument.instrument_id == CurrentPosition.instrument_id)
             .where(CurrentPosition.quantity != 0)
+            .where(CurrentPosition.cell_id == self.cell_id)
             .with_for_update(of=CurrentPosition)
         ).all()
         return [
@@ -448,11 +466,11 @@ class RiskGovernor:
         quote_age = request.market_mark.quote_age()
         if quote_age is None:
             return DisqualificationReason.INVALID_MARKET_TIMESTAMP
-        if quote_age > MAX_QUOTE_AGE:
+        if quote_age > self.max_quote_age:
             return DisqualificationReason.MARKET_DATA_STALE
-        if state.session_net_pnl <= LOSS_LIMIT:
+        if state.session_net_pnl <= self.loss_limit:
             return DisqualificationReason.SESSION_LOSS_LIMIT_REACHED
-        if state.session_net_pnl >= PROFIT_CEILING:
+        if state.session_net_pnl >= self.profit_ceiling:
             return DisqualificationReason.PROFIT_CEILING_REACHED
         if not self._clearance_matches(
             request.strategy_clearance, request.execution_environment
@@ -555,7 +573,7 @@ class RiskGovernor:
         pending_orders: list[PendingRiskOrder],
     ) -> tuple[ControlCommand, ...]:
         operational = OperationalState(state.operational_state)
-        if state.session_net_pnl <= LOSS_LIMIT and operational not in {
+        if state.session_net_pnl <= self.loss_limit and operational not in {
             OperationalState.HALTED_HARD,
             OperationalState.FLAT_LOCKED,
         }:
@@ -567,7 +585,7 @@ class RiskGovernor:
             )
             return self._liquidation_commands(event, positions, pending_orders) if event else ()
         if (
-            state.session_net_pnl >= PROFIT_CEILING
+            state.session_net_pnl >= self.profit_ceiling
             and operational is OperationalState.ARMED
         ):
             event = self.state_machine.transition(

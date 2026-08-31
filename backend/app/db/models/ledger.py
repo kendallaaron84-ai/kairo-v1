@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CHAR,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -462,17 +463,29 @@ class KairoCapitalAuthorizationRecord(Base):
             "broker_snapshot_id",
             "broker_account_id",
         ),
+        CheckConstraint(
+            "(economic_domain = 'LIVE' AND broker_account_id IS NOT NULL AND "
+            "broker_snapshot_id IS NOT NULL AND synthetic_provenance_id IS NULL) OR "
+            "(economic_domain = 'SYNTHETIC' AND broker_account_id IS NULL AND "
+            "broker_snapshot_id IS NULL AND synthetic_provenance_id IS NOT NULL)",
+            name="provenance_exclusive",
+        ),
     )
     authorization_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
-    broker_snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
-    broker_account_id: Mapped[UUID] = mapped_column(
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    broker_snapshot_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    broker_account_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey(
             "broker_accounts.broker_account_id",
             name="fk_capital_authorizations_broker_account",
         ),
-        nullable=False,
+    )
+    economic_domain: Mapped[str] = mapped_column(String(32), nullable=False, default="LIVE")
+    synthetic_provenance_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("synthetic_evidence_manifests.manifest_id")
     )
     settled_cash: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     safety_reserve: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
@@ -481,6 +494,31 @@ class KairoCapitalAuthorizationRecord(Base):
     committed_obligations: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     authorized_trading_cash: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SyntheticEvidenceManifest(Base):
+    __tablename__ = "synthetic_evidence_manifests"
+    __table_args__ = (
+        CheckConstraint("source_count >= 0", name="source_count_nonnegative"),
+        CheckConstraint("manifest_hash ~ '^[0-9a-f]{64}$'", name="manifest_hash_sha256"),
+        UniqueConstraint(
+            "manifest_type", "manifest_algorithm", "cell_id", "manifest_hash",
+            "model_identifier", "model_version", name="uq_synthetic_manifest_identity",
+        ),
+    )
+
+    manifest_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    manifest_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    manifest_algorithm: Mapped[str] = mapped_column(String(64), nullable=False)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_refs: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    model_identifier: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class TrustEvaluation(Base):

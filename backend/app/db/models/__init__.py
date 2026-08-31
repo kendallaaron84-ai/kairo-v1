@@ -1,5 +1,5 @@
 from app.db.models.broker import BrokerAccount, BrokerInstrumentCapability
-from app.db.models.configuration import CellTreasuryConfig, Instrument, StrategyRegistry, TrustPolicy
+from app.db.models.configuration import CellTreasuryConfig, Instrument, RiskPolicy, StrategyRegistry, TrustPolicy
 from app.db.models.ledger import (
     BrokerCashSnapshot,
     CellEvent,
@@ -14,6 +14,7 @@ from app.db.models.ledger import (
     SiphonEvent,
     SiphonAllocation,
     SiphonProfitAttribution,
+    SyntheticEvidenceManifest,
     TreasuryCashConsumption,
     TreasuryExecution,
     TreasuryRegimeObservation,
@@ -45,6 +46,7 @@ __all__ = [
     "OrderObservation",
     "OwnershipTreasuryHolding",
     "RiskDecision",
+    "RiskPolicy",
     "RiskGovernorState",
     "RiskInstrumentMark",
     "RiskSession",
@@ -52,6 +54,7 @@ __all__ = [
     "SiphonEvent",
     "SiphonAllocation",
     "SiphonProfitAttribution",
+    "SyntheticEvidenceManifest",
     "TreasuryCashConsumption",
     "TreasuryExecution",
     "TreasuryRegimeObservation",

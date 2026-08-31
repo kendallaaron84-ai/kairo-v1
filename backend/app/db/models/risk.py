@@ -7,10 +7,12 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -31,10 +33,14 @@ class RiskSession(Base):
     __tablename__ = "risk_sessions"
     __table_args__ = (
         CheckConstraint("session_close > session_open", name="valid_window"),
+        UniqueConstraint("cell_id", "session_id", name="uq_risk_sessions_cell_session"),
         Index("ix_risk_sessions_trading_date_window", "trading_date", "session_open", "session_close"),
     )
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
     trading_date: Mapped[date] = mapped_column(Date, nullable=False)
     market_timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, default="America/New_York"
@@ -49,6 +55,10 @@ class RiskSession(Base):
 class RiskStateEvent(Base):
     __tablename__ = "risk_state_events"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["cell_id", "session_id"], ["risk_sessions.cell_id", "risk_sessions.session_id"],
+            name="fk_risk_state_events_cell_session",
+        ),
         CheckConstraint(f"previous_state IN ({VALID_STATES})", name="valid_previous_state"),
         CheckConstraint(f"new_state IN ({VALID_STATES})", name="valid_new_state"),
         CheckConstraint("authorized_cash_usd >= 0", name="authorized_cash_nonnegative"),
@@ -64,6 +74,9 @@ class RiskStateEvent(Base):
     session_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("risk_sessions.session_id"), nullable=False
     )
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
     previous_state: Mapped[str] = mapped_column(String(32), nullable=False)
     new_state: Mapped[str] = mapped_column(String(32), nullable=False)
     trigger_reason: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -77,7 +90,11 @@ class RiskStateEvent(Base):
 class RiskGovernorState(Base):
     __tablename__ = "risk_governor_state"
     __table_args__ = (
-        CheckConstraint("singleton_key = 1", name="singleton"),
+        ForeignKeyConstraint(
+            ["cell_id", "current_session_id"],
+            ["risk_sessions.cell_id", "risk_sessions.session_id"],
+            name="fk_risk_governor_state_cell_session",
+        ),
         CheckConstraint(f"operational_state IN ({VALID_STATES})", name="valid_state"),
         CheckConstraint(
             "session_fees_usd >= 0 AND session_slippage_usd >= 0",
@@ -90,7 +107,9 @@ class RiskGovernorState(Base):
         ),
     )
 
-    singleton_key: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), primary_key=True
+    )
     current_session_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("risk_sessions.session_id"), nullable=False
     )

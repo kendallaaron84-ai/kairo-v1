@@ -52,8 +52,14 @@ class SeededContext:
     position: CurrentPosition | None
 
 
-def initialize_governor(session: Session, *, armed: bool = True) -> RiskGovernor:
-    governor = RiskGovernor(session)
+def initialize_governor(
+    session: Session, *, armed: bool = True, cell_id: UUID | None = None
+) -> RiskGovernor:
+    if cell_id is None:
+        cell_id = session.scalar(select(CapitalCell.cell_id).order_by(CapitalCell.cell_code))
+    if cell_id is None:
+        cell_id = seed_context(session).cell.cell_id
+    governor = RiskGovernor(session, cell_id=cell_id)
     now = datetime.now(UTC)
     governor.initialize_session(
         RiskSessionSpec(
@@ -396,7 +402,7 @@ def test_service_restart_does_not_clear_daily_halt(db_session: Session) -> None:
     )
     db_session.flush()
     db_session.expire_all()
-    restarted = RiskGovernor(db_session)
+    restarted = RiskGovernor(db_session, cell_id=governor.cell_id)
     assert restarted.current_state().operational_state == OperationalState.HALTED_HARD.value
 
 
@@ -593,7 +599,7 @@ def test_restart_preserves_locked_for_day(db_session: Session) -> None:
         accounting_event("20"), authorized_cash_usd=Decimal("0")
     )
     db_session.expire_all()
-    assert RiskGovernor(db_session).current_state().operational_state == "LOCKED_FOR_DAY"
+    assert RiskGovernor(db_session, cell_id=governor.cell_id).current_state().operational_state == "LOCKED_FOR_DAY"
 
 
 def test_restart_preserves_session_pnl_components(db_session: Session) -> None:
@@ -603,7 +609,7 @@ def test_restart_preserves_session_pnl_components(db_session: Session) -> None:
         authorized_cash_usd=Decimal("100"),
     )
     db_session.expire_all()
-    state = RiskGovernor(db_session).current_state()
+    state = RiskGovernor(db_session, cell_id=governor.cell_id).current_state()
     assert state.session_realized_pnl == Decimal("10")
     assert state.session_fees_usd == Decimal("1")
     assert state.session_slippage_usd == Decimal("0.5")
@@ -846,7 +852,7 @@ def test_persisted_portfolio_marks_survive_governor_restart(
     db_session.flush()
     db_session.expire_all()
 
-    restarted = RiskGovernor(db_session)
+    restarted = RiskGovernor(db_session, cell_id=governor.cell_id)
     record_portfolio_mark(restarted, first, "13", positions)
 
     assert restarted.current_state().session_unrealized_pnl == Decimal("-2")

@@ -19,6 +19,7 @@ from app.db.models.ledger import (
     OrderIntent,
     OrderObservation,
     RiskDecision,
+    SyntheticEvidenceManifest,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition
 from app.db.models.risk import (
@@ -388,6 +389,38 @@ def test_replay_manifest_is_stable_across_fresh_databases(db_session: Session) -
     clean_replay_records(db_session)
     _, second = run_replay(db_session, seeded)
     assert first.manifest_hash == second.manifest_hash
+
+
+def test_replay_persists_existing_deterministic_manifest_as_synthetic_evidence(
+    db_session: Session,
+) -> None:
+    seeded = seed_replay(db_session)
+    _, result = run_replay(db_session, seeded)
+    persisted = db_session.get(SyntheticEvidenceManifest, result.manifest_id)
+    assert persisted is not None
+    assert persisted.manifest_hash == result.manifest_hash
+    assert persisted.manifest_type == "REPLAY_RUN"
+    assert persisted.manifest_algorithm == "REPLAY-MANIFEST-v1"
+    assert persisted.cell_id == seeded.config.cell_id
+
+
+def test_identical_replay_produces_same_manifest_identity(db_session: Session) -> None:
+    seeded = seed_replay(db_session)
+    _, first = run_replay(db_session, seeded)
+    clean_replay_records(db_session)
+    _, second = run_replay(db_session, seeded)
+    assert first.manifest_id == second.manifest_id
+
+
+def test_manifest_hash_recomputes_from_canonical_replay_facts(db_session: Session) -> None:
+    seeded = seed_replay(db_session)
+    orchestrator, result = run_replay(db_session, seeded)
+    recomputed, ids = orchestrator.build_manifest()
+    persisted = db_session.get(SyntheticEvidenceManifest, result.manifest_id)
+    assert persisted is not None
+    assert recomputed == persisted.manifest_hash == result.manifest_hash
+    assert persisted.source_count == len(ids)
+    assert persisted.source_refs == {"financial_ids": [str(item) for item in ids]}
 
 
 def test_slippage_is_not_double_counted_in_session_pnl(db_session: Session) -> None:

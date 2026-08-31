@@ -238,7 +238,7 @@ class VerificationReplaySupport:
         day: int = 0,
         armed: bool = True,
     ) -> RiskGovernor:
-        governor = RiskGovernor(self.session)
+        governor = RiskGovernor(self.session, cell_id=self.cell.cell_id)
         start = self.session_open(day)
         governor.initialize_session(
             RiskSessionSpec(
