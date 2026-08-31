@@ -155,7 +155,9 @@ def add_profit(
         status="FILLED",
         submitted_at=at,
     )
-    session.add_all([intent, order])
+    session.add(intent)
+    session.flush()
+    session.add(order)
     session.flush()
     source_snapshot_id = None
     metadata: dict = {}
