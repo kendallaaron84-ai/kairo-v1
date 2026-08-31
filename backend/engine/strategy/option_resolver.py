@@ -133,7 +133,7 @@ def resolve_legacy_option(
     canonical = canonical_lookup.get(chosen.instrument_id)
     if canonical is None:
         raise ValueError("selected option is absent or retired in the canonical instrument registry")
-    _validate_candidate_identity(chosen, canonical)
+    validate_candidate_identity(chosen, canonical)
     return ResolvedOptionContract(
         instrument_id=canonical.instrument_id,
         symbol=canonical.symbol,
@@ -151,7 +151,7 @@ def resolve_legacy_option(
     )
 
 
-def _validate_candidate_identity(
+def validate_candidate_identity(
     candidate: OptionContractCandidate, canonical: CanonicalInstrument
 ) -> None:
     if canonical.asset_class != "OPTION":

@@ -29,10 +29,12 @@ from app.db.models.risk import (
 )
 from app.domain.enums import OptionRight
 from engine.execution.replay_orchestrator import (
-    ReplayMarketEvent,
-    ReplayOptionQuote,
+    LegacyReplayInput,
+    ReplayOptionCandidate,
+    ReplayOptionChainEvent,
     ReplayOrchestrator,
     ReplaySessionConfig,
+    ResearchReplayInput,
 )
 from engine.execution.virtual_clock import ReplayIdentityFactory
 from engine.risk.models import FillAccountingEvent, PnLSnapshot
@@ -41,6 +43,15 @@ from engine.strategy.ema_cross_strategy import (
     EMACrossStrategy,
     StrategyContract,
     StrategyPosition,
+)
+from engine.strategy.market_data import (
+    LegacyReplayProvenance,
+    LegacyReplayProvider,
+    ReplayMode,
+    ResearchEventKind,
+    ResearchMarketEvent,
+    ResearchReplayProvider,
+    SampledPriceObservation,
 )
 
 
@@ -53,6 +64,7 @@ CELL_ID = UUID("30000000-0000-4000-8000-000000000002")
 UNDERLYING_ID = UUID("30000000-0000-4000-8000-000000000003")
 CALL_ID = UUID("30000000-0000-4000-8000-000000000004")
 PUT_ID = UUID("30000000-0000-4000-8000-000000000005")
+ALT_CALL_ID = UUID("30000000-0000-4000-8000-000000000008")
 
 
 @dataclass
@@ -60,9 +72,12 @@ class SeededReplay:
     config: ReplaySessionConfig
     call: Instrument
     put: Instrument
+    alt_call: Instrument
 
 
-def seed_replay(session: Session) -> SeededReplay:
+def seed_replay(
+    session: Session, *, execution_authorized: bool = True
+) -> SeededReplay:
     broker = BrokerAccount(
         broker_account_id=BROKER_ID,
         account_key="step4-paper",
@@ -78,52 +93,28 @@ def seed_replay(session: Session) -> SeededReplay:
         currency="USD",
         effective_from=SESSION_OPEN,
     )
-    call = Instrument(
-        instrument_id=CALL_ID,
-        symbol="TQQQ-CALL-STEP4",
-        asset_class="OPTION",
-        currency="USD",
-        underlying_symbol="TQQQ",
-        contract_symbol="TQQQ260901C00050000",
-        expiration_date=date(2026, 9, 1),
-        strike_price=Decimal("50"),
-        option_right="CALL",
-        contract_multiplier=Decimal("100"),
-        listing_type="STANDARD",
-        effective_from=SESSION_OPEN,
-    )
-    put = Instrument(
-        instrument_id=PUT_ID,
-        symbol="TQQQ-PUT-STEP4",
-        asset_class="OPTION",
-        currency="USD",
-        underlying_symbol="TQQQ",
-        contract_symbol="TQQQ260901P00050000",
-        expiration_date=date(2026, 9, 1),
-        strike_price=Decimal("50"),
-        option_right="PUT",
-        contract_multiplier=Decimal("100"),
-        listing_type="STANDARD",
-        effective_from=SESSION_OPEN,
-    )
-    session.add_all([broker, underlying, call, put])
+    call = option_instrument(CALL_ID, "CALL", "10")
+    put = option_instrument(PUT_ID, "PUT", "10")
+    alt_call = option_instrument(ALT_CALL_ID, "CALL", "11")
+    session.add_all([broker, underlying, call, put, alt_call])
     session.flush()
     strategy = session.get(StrategyRegistry, ("EMA-CROSS-001", "1.0.0"))
     assert strategy is not None
-    cell = CapitalCell(
-        cell_id=CELL_ID,
-        cell_code="STEP4-CELL",
-        seed_capital=Decimal("1000"),
-        status="ACTIVE",
-        autonomy_tier="APPRENTICE",
-        strategy_id=strategy.strategy_id,
-        strategy_version=strategy.version_tag,
-        target_treasury_code="META",
-        updated_at=SESSION_OPEN,
+    session.add(
+        CapitalCell(
+            cell_id=CELL_ID,
+            cell_code="STEP4-CELL",
+            seed_capital=Decimal("1000"),
+            status="ACTIVE",
+            autonomy_tier="APPRENTICE",
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version_tag,
+            target_treasury_code="META",
+            updated_at=SESSION_OPEN,
+        )
     )
-    session.add(cell)
     session.flush()
-    for instrument in (call, put):
+    for instrument in (call, put, alt_call):
         session.add(
             BrokerInstrumentCapability(
                 capability_id=UUID(int=instrument.instrument_id.int + 100),
@@ -174,36 +165,142 @@ def seed_replay(session: Session) -> SeededReplay:
             broker_account_id=BROKER_ID,
             session_open=SESSION_OPEN,
             session_close=SESSION_CLOSE,
+            execution_authorized_for_replay=execution_authorized,
             initial_cash_usd=Decimal("1000"),
         ),
         call=call,
         put=put,
+        alt_call=alt_call,
     )
 
 
-def option_quote(instrument_id: UUID, right: OptionRight, *, bid: str = "0.47"):
-    return ReplayOptionQuote(
+def option_instrument(
+    instrument_id: UUID, right: str, strike: str
+) -> Instrument:
+    strike_code = f"{int(Decimal(strike) * 1000):08d}"
+    return Instrument(
         instrument_id=instrument_id,
+        symbol=f"TQQQ-{right}-{strike}",
+        asset_class="OPTION",
+        currency="USD",
+        underlying_symbol="TQQQ",
+        contract_symbol=f"TQQQ260901{right[0]}{strike_code}",
+        expiration_date=date(2026, 9, 1),
+        strike_price=Decimal(strike),
         option_right=right,
+        contract_multiplier=Decimal("100"),
+        listing_type="STANDARD",
+        effective_from=SESSION_OPEN,
+    )
+
+
+def candidate(
+    instrument: Instrument,
+    *,
+    bid: str = "0.47",
+    ask: str = "0.50",
+    volume: int = 10,
+    open_interest: int = 0,
+) -> ReplayOptionCandidate:
+    return ReplayOptionCandidate(
+        instrument_id=instrument.instrument_id,
+        underlying_symbol=instrument.underlying_symbol,
+        expiration_date=instrument.expiration_date,
+        strike_price=instrument.strike_price,
+        option_right=OptionRight(instrument.option_right),
+        contract_symbol=instrument.contract_symbol,
+        contract_multiplier=instrument.contract_multiplier,
+        listing_type=instrument.listing_type,
         bid=Decimal(bid),
-        ask=Decimal("0.50"),
+        ask=Decimal(ask),
         bid_size=Decimal("10"),
         ask_size=Decimal("10"),
+        volume=volume,
+        open_interest=open_interest,
     )
 
 
-def crossover_events() -> tuple[ReplayMarketEvent, ...]:
-    prices = [Decimal("10")] * 9 + [Decimal("11")]
+def chain(
+    seeded: SeededReplay,
+    timestamp: datetime,
+    *,
+    call_bid: str = "0.47",
+    call_ask: str = "0.50",
+    candidates: tuple[ReplayOptionCandidate, ...] | None = None,
+) -> ReplayOptionChainEvent:
+    return ReplayOptionChainEvent(
+        timestamp=timestamp,
+        underlying_symbol="TQQQ",
+        candidates=candidates
+        or (
+            candidate(seeded.call, bid=call_bid, ask=call_ask),
+            candidate(seeded.put),
+        ),
+    )
+
+
+def legacy_provider() -> LegacyReplayProvider:
+    return LegacyReplayProvider(
+        source_id="prototype-samples-step4",
+        provenance=LegacyReplayProvenance.EXACT_OBSERVED_SAMPLES,
+        instrument_id=UNDERLYING_ID,
+        symbol="TQQQ",
+    )
+
+
+def legacy_observations() -> tuple[SampledPriceObservation, ...]:
+    prices = [Decimal("10")] * 9 + [Decimal("11"), Decimal("11")]
     return tuple(
-        ReplayMarketEvent(
-            instrument_id=UNDERLYING_ID,
-            symbol="TQQQ",
+        SampledPriceObservation(
             timestamp=SESSION_OPEN + timedelta(minutes=index),
             price=price,
-            call_quote=option_quote(CALL_ID, OptionRight.CALL),
-            put_quote=option_quote(PUT_ID, OptionRight.PUT),
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
         )
         for index, price in enumerate(prices)
+    )
+
+
+def legacy_input(
+    seeded: SeededReplay,
+    *,
+    observations: tuple[SampledPriceObservation, ...] | None = None,
+    chain_factory=None,
+) -> LegacyReplayInput:
+    source = observations or legacy_observations()
+    make_chain = chain_factory or (lambda timestamp: chain(seeded, timestamp))
+    return LegacyReplayInput(
+        provider=legacy_provider(),
+        observations=source,
+        option_chains=tuple(make_chain(item.timestamp) for item in source),
+    )
+
+
+def research_input(seeded: SeededReplay) -> ResearchReplayInput:
+    prices = [Decimal("10")] * 9 + [Decimal("11")]
+    events = tuple(
+        ResearchMarketEvent(
+            timestamp=SESSION_OPEN + timedelta(minutes=index),
+            kind=ResearchEventKind.BAR,
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=Decimal("1000"),
+        )
+        for index, price in enumerate(prices)
+    )
+    return ResearchReplayInput(
+        provider=ResearchReplayProvider(
+            source_id="canonical-research-bars-step4",
+            source_kind="CANONICAL_HISTORICAL_BARS",
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
+        ),
+        events=events,
+        option_chains=tuple(chain(seeded, item.timestamp) for item in events),
     )
 
 
@@ -228,17 +325,20 @@ def clean_replay_records(session: Session) -> None:
 
 def run_replay(session: Session, seeded: SeededReplay):
     orchestrator = ReplayOrchestrator(session, seeded.config)
-    return orchestrator, orchestrator.replay(crossover_events())
+    return orchestrator, orchestrator.replay_legacy((legacy_input(seeded),))
 
 
 def test_replay_rejects_timezone_naive_market_event(db_session: Session) -> None:
     seeded = seed_replay(db_session)
-    orchestrator = ReplayOrchestrator(db_session, seeded.config)
-    event = crossover_events()[0].model_copy(
-        update={"timestamp": datetime(2026, 9, 1, 9, 30)}
+    invalid = SampledPriceObservation.model_construct(
+        timestamp=datetime(2026, 9, 1, 9, 30),
+        price=Decimal("10"),
+        instrument_id=UNDERLYING_ID,
+        symbol="TQQQ",
     )
+    stream = LegacyReplayInput(provider=legacy_provider(), observations=(invalid,))
     with pytest.raises(ValueError, match="timezone-aware"):
-        orchestrator.process_event(event)
+        ReplayOrchestrator(db_session, seeded.config).replay_legacy((stream,))
 
 
 def test_replay_generated_ids_are_deterministic(db_session: Session) -> None:
@@ -265,7 +365,7 @@ def test_same_economic_replay_remains_identity_stable_when_nonfinancial_telemetr
 def test_replay_generated_timestamps_use_virtual_clock_only(db_session: Session) -> None:
     seeded = seed_replay(db_session)
     run_replay(db_session, seeded)
-    allowed = {SESSION_OPEN, *(event.timestamp for event in crossover_events())}
+    allowed = {item.timestamp for item in legacy_observations()}
     timestamp_values = [
         *db_session.scalars(select(MarketSnapshot.captured_at)),
         *db_session.scalars(select(OrderIntent.created_at)),
@@ -288,9 +388,8 @@ def test_replay_manifest_is_stable_across_fresh_databases(db_session: Session) -
 
 
 def test_slippage_is_not_double_counted_in_session_pnl(db_session: Session) -> None:
-    snapshot = PnLSnapshot(net_pnl=Decimal("0"))
     updated = apply_fill(
-        snapshot,
+        PnLSnapshot(net_pnl=Decimal("0")),
         FillAccountingEvent(
             fill_id=CALL_ID,
             kairo_order_id=CELL_ID,
@@ -334,15 +433,22 @@ def test_open_position_market_mark_can_trigger_loss_halt_without_new_fill(
     seeded = seed_replay(db_session)
     orchestrator, _ = run_replay(db_session, seeded)
     fill_count = db_session.scalar(select(func.count()).select_from(Fill))
-    loss_event = ReplayMarketEvent(
+    timestamp = SESSION_OPEN + timedelta(minutes=11)
+    observation = SampledPriceObservation(
+        timestamp=timestamp,
+        price=Decimal("11"),
         instrument_id=UNDERLYING_ID,
         symbol="TQQQ",
-        timestamp=SESSION_OPEN + timedelta(minutes=10),
-        price=Decimal("11"),
-        call_quote=option_quote(CALL_ID, OptionRight.CALL, bid="0.30"),
-        put_quote=option_quote(PUT_ID, OptionRight.PUT),
     )
-    orchestrator.process_event(loss_event)
+    orchestrator.replay_legacy(
+        (
+            LegacyReplayInput(
+                provider=legacy_provider(),
+                observations=(observation,),
+                option_chains=(chain(seeded, timestamp, call_bid="0.30"),),
+            ),
+        )
+    )
     assert orchestrator.governor.current_state().operational_state == "HALTED_HARD"
     assert db_session.scalar(select(func.count()).select_from(Fill)) == fill_count
 
@@ -450,14 +556,29 @@ def test_1545_runtime_emits_exit_intent_without_bypassing_governor(
         )
     )
     db_session.flush()
-    orchestrator.process_event(
-        ReplayMarketEvent(
-            instrument_id=UNDERLYING_ID,
-            symbol="TQQQ",
-            timestamp=datetime(2026, 9, 1, 15, 45, tzinfo=EASTERN),
-            price=Decimal("10"),
-            call_quote=option_quote(CALL_ID, OptionRight.CALL, bid="0.49"),
-            put_quote=option_quote(PUT_ID, OptionRight.PUT),
+    timestamp = datetime(2026, 9, 1, 15, 45, tzinfo=EASTERN)
+    bar = ResearchMarketEvent(
+        timestamp=timestamp,
+        kind=ResearchEventKind.BAR,
+        instrument_id=UNDERLYING_ID,
+        symbol="TQQQ",
+        open=Decimal("10"),
+        high=Decimal("10"),
+        low=Decimal("10"),
+        close=Decimal("10"),
+    )
+    orchestrator.replay_research(
+        (
+            ResearchReplayInput(
+                provider=ResearchReplayProvider(
+                    source_id="forced-flatten-test",
+                    source_kind="BAR",
+                    instrument_id=UNDERLYING_ID,
+                    symbol="TQQQ",
+                ),
+                events=(bar,),
+                option_chains=(chain(seeded, timestamp, call_bid="0.49"),),
+            ),
         )
     )
     intent = db_session.scalar(select(OrderIntent).order_by(OrderIntent.created_at.desc()))
@@ -466,8 +587,136 @@ def test_1545_runtime_emits_exit_intent_without_bypassing_governor(
     )
     assert intent.order_purpose == "EMERGENCY_EXIT"
     assert decision.verdict == "AUTHORIZED"
-    assert db_session.scalar(
-        select(func.count()).select_from(KairoOrder).where(
-            KairoOrder.intent_id == intent.intent_id
+
+
+def test_legacy_replay_pipeline_uses_exact_sampled_minute_rollover(
+    db_session: Session,
+) -> None:
+    seeded = seed_replay(db_session)
+    observations = (
+        SampledPriceObservation(
+            timestamp=SESSION_OPEN + timedelta(seconds=5),
+            price=Decimal("10"),
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
+        ),
+        SampledPriceObservation(
+            timestamp=SESSION_OPEN + timedelta(seconds=45),
+            price=Decimal("10.25"),
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
+        ),
+        SampledPriceObservation(
+            timestamp=SESSION_OPEN + timedelta(minutes=1, seconds=2),
+            price=Decimal("10.50"),
+            instrument_id=UNDERLYING_ID,
+            symbol="TQQQ",
+        ),
+    )
+    ReplayOrchestrator(db_session, seeded.config).replay_legacy(
+        (legacy_input(seeded, observations=observations),)
+    )
+    closing_snapshot = db_session.scalar(
+        select(MarketSnapshot).where(
+            MarketSnapshot.captured_at == observations[-1].timestamp,
+            MarketSnapshot.instrument_id == UNDERLYING_ID,
         )
-    ) == 1
+    )
+    assert closing_snapshot.payload["completed_close"] == "10.25"
+    assert closing_snapshot.payload["exact_prototype_replay"] is True
+    assert "open" not in closing_snapshot.payload
+
+
+def test_research_replay_preserves_non_exact_lineage(db_session: Session) -> None:
+    seeded = seed_replay(db_session)
+    result = ReplayOrchestrator(db_session, seeded.config).replay_research(
+        (research_input(seeded),)
+    )
+    assert result.lineage[0].replay_mode is ReplayMode.RESEARCH
+    assert result.lineage[0].exact_prototype_replay is False
+    snapshot = db_session.scalar(
+        select(MarketSnapshot).where(MarketSnapshot.instrument_id == UNDERLYING_ID)
+    )
+    assert snapshot.payload["exact_prototype_replay"] is False
+
+
+def test_replay_option_selection_uses_frozen_filter_first_resolver(
+    db_session: Session,
+) -> None:
+    seeded = seed_replay(db_session)
+
+    def filter_first_chain(timestamp: datetime) -> ReplayOptionChainEvent:
+        return chain(
+            seeded,
+            timestamp,
+            candidates=(
+                candidate(seeded.call, bid="0.57", ask="0.60"),
+                candidate(seeded.alt_call),
+                candidate(seeded.put),
+            ),
+        )
+
+    ReplayOrchestrator(db_session, seeded.config).replay_legacy(
+        (legacy_input(seeded, chain_factory=filter_first_chain),)
+    )
+    intent = db_session.scalar(select(OrderIntent))
+    assert intent.instrument_id == ALT_CALL_ID
+
+
+def test_replay_rejects_preselected_contract_that_fails_frozen_filters(
+    db_session: Session,
+) -> None:
+    seeded = seed_replay(db_session)
+
+    def ineligible_chain(timestamp: datetime) -> ReplayOptionChainEvent:
+        return chain(
+            seeded,
+            timestamp,
+            candidates=(
+                candidate(seeded.call, bid="0.57", ask="0.60"),
+                candidate(seeded.put),
+            ),
+        )
+
+    ReplayOrchestrator(db_session, seeded.config).replay_legacy(
+        (legacy_input(seeded, chain_factory=ineligible_chain),)
+    )
+    assert db_session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+def test_long_option_mark_to_market_uses_bid_not_midpoint(db_session: Session) -> None:
+    seeded = seed_replay(db_session)
+    orchestrator, _ = run_replay(db_session, seeded)
+    timestamp = SESSION_OPEN + timedelta(minutes=11)
+    observation = SampledPriceObservation(
+        timestamp=timestamp,
+        price=Decimal("11"),
+        instrument_id=UNDERLYING_ID,
+        symbol="TQQQ",
+    )
+    orchestrator.replay_legacy(
+        (
+            LegacyReplayInput(
+                provider=legacy_provider(),
+                observations=(observation,),
+                option_chains=(
+                    chain(
+                        seeded,
+                        timestamp,
+                        call_bid="0.48",
+                        call_ask="0.52",
+                    ),
+                ),
+            ),
+        )
+    )
+    state = orchestrator.governor.current_state()
+    assert state.session_unrealized_pnl == Decimal("-6")
+    assert state.operational_state == "HALTED_HARD"
+
+
+def test_replay_requires_explicit_arm_authorization(db_session: Session) -> None:
+    seeded = seed_replay(db_session, execution_authorized=False)
+    orchestrator = ReplayOrchestrator(db_session, seeded.config)
+    orchestrator.initialize()
+    assert orchestrator.governor.current_state().operational_state == "DISARMED"

@@ -1,12 +1,13 @@
 import asyncio
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,15 +28,16 @@ from app.db.models.risk import (
     RiskStateEvent,
 )
 from app.domain.enums import OptionRight
+from app.domain.instruments import CanonicalInstrument
 from engine.execution.models import (
     ExecutionQuote,
     LiquidityFidelityTier,
     PaperEngineConfig,
+    SimulatedFillPayload,
 )
 from engine.execution.paper_broker import PaperExecutionEngine
 from engine.execution.virtual_clock import ReplayIdentityFactory, VirtualClock
 from engine.risk.governor import RiskGovernor
-from engine.risk.pnl_tracker import realized_round_trip_pnl
 from engine.risk.models import (
     DecisionVerdict,
     ExecutionEnvironment,
@@ -48,11 +50,27 @@ from engine.risk.models import (
     RiskSessionSpec,
     StrategyClearance,
 )
+from engine.risk.pnl_tracker import realized_round_trip_pnl
 from engine.strategy.ema_cross_strategy import (
     EMACrossStrategy,
     StrategyContract,
     StrategyOrderSignal,
     StrategyPosition,
+)
+from engine.strategy.market_data import (
+    LegacyReplayProvider,
+    MarketDataLineage,
+    ResearchEventKind,
+    ResearchMarketEvent,
+    ResearchReplayProvider,
+    SampledPriceObservation,
+)
+from engine.strategy.option_resolver import (
+    LegacySessionExpirationResolver,
+    OptionContractCandidate,
+    ResolvedOptionContract,
+    resolve_legacy_option,
+    validate_candidate_identity,
 )
 
 
@@ -64,33 +82,92 @@ class ReplaySessionConfig(BaseModel):
     broker_account_id: UUID
     session_open: datetime
     session_close: datetime
+    execution_authorized_for_replay: bool
     strategy_id: str = "EMA-CROSS-001"
     strategy_version: str = "1.0.0"
     environment: str = "PAPER"
     initial_cash_usd: Decimal = Field(default=Decimal("100.00"), ge=0)
 
+    @model_validator(mode="after")
+    def timestamps_are_aware(self) -> "ReplaySessionConfig":
+        if any(
+            item.tzinfo is None or item.utcoffset() is None
+            for item in (self.session_open, self.session_close)
+        ):
+            raise ValueError("replay session timestamps must be timezone-aware")
+        if self.session_close <= self.session_open:
+            raise ValueError("replay session_close must be after session_open")
+        return self
 
-class ReplayOptionQuote(BaseModel):
+
+class ReplayOptionCandidate(BaseModel):
+    """Source-supported option-chain row, not a preselected strategy contract."""
+
     model_config = ConfigDict(frozen=True)
 
     instrument_id: UUID
+    underlying_symbol: str = Field(min_length=1)
+    expiration_date: date
+    strike_price: Decimal = Field(gt=0)
     option_right: OptionRight
-    bid: Decimal = Field(gt=0)
-    ask: Decimal = Field(gt=0)
-    bid_size: Decimal = Field(gt=0)
-    ask_size: Decimal = Field(gt=0)
+    contract_symbol: str | None = None
+    contract_multiplier: Decimal = Field(gt=0)
+    listing_type: str = Field(default="STANDARD", min_length=1)
+    bid: Decimal
+    ask: Decimal
+    bid_size: Decimal = Field(ge=0)
+    ask_size: Decimal = Field(ge=0)
+    volume: int = Field(ge=0)
+    open_interest: int = Field(ge=0)
+
+    def resolver_candidate(self) -> OptionContractCandidate:
+        return OptionContractCandidate(
+            instrument_id=self.instrument_id,
+            underlying_symbol=self.underlying_symbol,
+            expiration_date=self.expiration_date,
+            strike_price=self.strike_price,
+            option_right=self.option_right,
+            contract_symbol=self.contract_symbol,
+            contract_multiplier=self.contract_multiplier,
+            listing_type=self.listing_type,
+            bid=self.bid,
+            ask=self.ask,
+            volume=self.volume,
+            open_interest=self.open_interest,
+        )
 
 
-class ReplayMarketEvent(BaseModel):
+class ReplayOptionChainEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    instrument_id: UUID
-    symbol: str
     timestamp: datetime
-    price: Decimal = Field(gt=0)
-    completed_minute_close: bool = True
-    call_quote: ReplayOptionQuote | None = None
-    put_quote: ReplayOptionQuote | None = None
+    underlying_symbol: str = Field(min_length=1)
+    candidates: tuple[ReplayOptionCandidate, ...]
+
+    @model_validator(mode="after")
+    def valid_chain(self) -> "ReplayOptionChainEvent":
+        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("option-chain timestamp must be timezone-aware")
+        if any(
+            item.underlying_symbol != self.underlying_symbol
+            for item in self.candidates
+        ):
+            raise ValueError("option chain cannot mix underlying symbols")
+        return self
+
+
+@dataclass(frozen=True)
+class LegacyReplayInput:
+    provider: LegacyReplayProvider
+    observations: tuple[SampledPriceObservation, ...]
+    option_chains: tuple[ReplayOptionChainEvent, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResearchReplayInput:
+    provider: ResearchReplayProvider
+    events: tuple[ResearchMarketEvent, ...]
+    option_chains: tuple[ReplayOptionChainEvent, ...] = ()
 
 
 class ReplayRunResult(BaseModel):
@@ -99,12 +176,50 @@ class ReplayRunResult(BaseModel):
     manifest_hash: str
     financial_ids: tuple[UUID, ...]
     event_count: int
+    lineage: tuple[MarketDataLineage, ...]
+
+
+@dataclass(frozen=True)
+class _NormalizedMarketEvent:
+    instrument_id: UUID
+    symbol: str
+    timestamp: datetime
+    mark_price: Decimal
+    completed_close: Decimal | None
+    lineage: MarketDataLineage
+    source_payload: dict[str, Any]
+    option_chain: ReplayOptionChainEvent | None
+    stable_order: int
+
+
+class _DatabaseInstrumentLookup:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, instrument_id: UUID) -> CanonicalInstrument | None:
+        row = self.session.get(Instrument, instrument_id)
+        if row is None or row.retired_at is not None:
+            return None
+        return CanonicalInstrument(
+            instrument_id=row.instrument_id,
+            symbol=row.symbol,
+            asset_class=row.asset_class,
+            currency=row.currency,
+            exchange=row.exchange,
+            underlying_symbol=row.underlying_symbol,
+            contract_symbol=row.contract_symbol,
+            expiration_date=row.expiration_date,
+            strike_price=row.strike_price,
+            option_right=row.option_right,
+            contract_multiplier=row.contract_multiplier,
+            listing_type=row.listing_type,
+            effective_from=row.effective_from,
+            retired_at=row.retired_at,
+        )
 
 
 class ReplayOrchestrator:
     def __init__(self, session: Session, config: ReplaySessionConfig) -> None:
-        if config.session_open.tzinfo is None or config.session_close.tzinfo is None:
-            raise ValueError("replay session timestamps must be timezone-aware")
         self.session = session
         self.config = config
         self.clock = VirtualClock(config.session_open)
@@ -119,6 +234,10 @@ class ReplayOrchestrator:
             identities=self.identities,
         )
         self.strategy = EMACrossStrategy(settled_cash=config.initial_cash_usd)
+        self.expirations = LegacySessionExpirationResolver(
+            session_date=config.session_open.date()
+        )
+        self.canonical_lookup = _DatabaseInstrumentLookup(session)
         self._snapshot_ids: list[UUID] = []
         self._intent_ids: list[UUID] = []
         self._event_count = 0
@@ -132,63 +251,189 @@ class ReplayOrchestrator:
                 session_close=self.config.session_close,
             )
         )
-        if state.operational_state == "DISARMED":
+        if (
+            state.operational_state == "DISARMED"
+            and self.config.execution_authorized_for_replay
+        ):
             self.governor.arm(authorized_cash_usd=self.config.initial_cash_usd)
 
-    def replay(self, events: tuple[ReplayMarketEvent, ...]) -> ReplayRunResult:
+    def replay_legacy(
+        self, streams: tuple[LegacyReplayInput, ...]
+    ) -> ReplayRunResult:
+        normalized: list[_NormalizedMarketEvent] = []
+        lineages: list[MarketDataLineage] = []
+        all_chains: list[ReplayOptionChainEvent] = []
+        stable_order = 0
+        for stream in streams:
+            result = stream.provider.replay(stream.observations)
+            lineage = result.lineage
+            lineages.append(lineage)
+            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol)
+            all_chains.extend(stream.option_chains)
+            completed_by_time = {
+                item.completed_at: item for item in result.completed_minutes
+            }
+            for observation in result.observations:
+                self._require_aware(observation.timestamp)
+                completed = completed_by_time.get(observation.timestamp)
+                normalized.append(
+                    _NormalizedMarketEvent(
+                        instrument_id=observation.instrument_id,
+                        symbol=observation.symbol,
+                        timestamp=observation.timestamp,
+                        mark_price=observation.price,
+                        completed_close=completed.close if completed else None,
+                        lineage=lineage,
+                        source_payload={
+                            "sampled_price": str(observation.price),
+                            "completed_minute_start": (
+                                completed.minute_start.isoformat() if completed else None
+                            ),
+                            "source_observation_timestamp": (
+                                completed.source_observation_timestamp.isoformat()
+                                if completed
+                                else None
+                            ),
+                        },
+                        option_chain=chain_by_time.get(observation.timestamp),
+                        stable_order=stable_order,
+                    )
+                )
+                stable_order += 1
+        return self._run_normalized(normalized, lineages, all_chains)
+
+    def replay_research(
+        self, streams: tuple[ResearchReplayInput, ...]
+    ) -> ReplayRunResult:
+        normalized: list[_NormalizedMarketEvent] = []
+        lineages: list[MarketDataLineage] = []
+        all_chains: list[ReplayOptionChainEvent] = []
+        stable_order = 0
+        for stream in streams:
+            result = stream.provider.ingest(stream.events)
+            lineage = result.lineage
+            lineages.append(lineage)
+            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol)
+            all_chains.extend(stream.option_chains)
+            for source_event in result.events:
+                self._require_aware(source_event.timestamp)
+                mark_price, completed_close = self._research_prices(source_event)
+                normalized.append(
+                    _NormalizedMarketEvent(
+                        instrument_id=source_event.instrument_id,
+                        symbol=source_event.symbol,
+                        timestamp=source_event.timestamp,
+                        mark_price=mark_price,
+                        completed_close=completed_close,
+                        lineage=lineage,
+                        source_payload=source_event.model_dump(mode="json"),
+                        option_chain=chain_by_time.get(source_event.timestamp),
+                        stable_order=stable_order,
+                    )
+                )
+                stable_order += 1
+        return self._run_normalized(normalized, lineages, all_chains)
+
+    def _run_normalized(
+        self,
+        events: list[_NormalizedMarketEvent],
+        lineages: list[MarketDataLineage],
+        chains: list[ReplayOptionChainEvent],
+    ) -> ReplayRunResult:
+        self._prime_expirations(chains)
         self.initialize()
-        for event in events:
-            self.process_event(event)
+        for event in sorted(events, key=lambda item: (item.timestamp, item.stable_order)):
+            self._process_event(event)
         manifest_hash, ids = self.build_manifest()
         return ReplayRunResult(
             manifest_hash=manifest_hash,
             financial_ids=ids,
             event_count=self._event_count,
+            lineage=tuple(lineages),
         )
 
-    def process_event(self, event: ReplayMarketEvent) -> None:
-        if event.timestamp.tzinfo is None or event.timestamp.utcoffset() is None:
+    @staticmethod
+    def _require_aware(timestamp: datetime) -> None:
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("replay market event timestamp must be timezone-aware")
+
+    @staticmethod
+    def _chain_index(
+        chains: tuple[ReplayOptionChainEvent, ...], symbol: str
+    ) -> dict[datetime, ReplayOptionChainEvent]:
+        index: dict[datetime, ReplayOptionChainEvent] = {}
+        for chain in chains:
+            if chain.underlying_symbol != symbol:
+                raise ValueError("option chain does not match replay stream symbol")
+            if chain.timestamp in index:
+                raise ValueError("duplicate option-chain timestamp for replay stream")
+            index[chain.timestamp] = chain
+        return index
+
+    @staticmethod
+    def _research_prices(event: ResearchMarketEvent) -> tuple[Decimal, Decimal | None]:
+        if event.kind is ResearchEventKind.BAR:
+            assert event.close is not None
+            return event.close, event.close
+        if event.kind in {ResearchEventKind.TICK, ResearchEventKind.TRADE}:
+            assert event.price is not None
+            return event.price, None
+        assert event.bid is not None and event.ask is not None
+        return (event.bid + event.ask) / Decimal("2"), None
+
+    def _prime_expirations(self, chains: list[ReplayOptionChainEvent]) -> None:
+        first_by_symbol: dict[str, ReplayOptionChainEvent] = {}
+        for chain in sorted(chains, key=lambda item: item.timestamp):
+            if chain.candidates:
+                first_by_symbol.setdefault(chain.underlying_symbol, chain)
+        for symbol, chain in first_by_symbol.items():
+            self.expirations.resolve(
+                symbol,
+                tuple(item.expiration_date for item in chain.candidates),
+            )
+
+    def _process_event(self, event: _NormalizedMarketEvent) -> None:
         self.clock.advance_to(event.timestamp)
         self._event_count += 1
         self._persist_underlying_snapshot(event)
+        execution_quotes = self._persist_option_chain(event.option_chain)
 
-        option_quotes = tuple(
-            item for item in (event.call_quote, event.put_quote) if item is not None
-        )
-        execution_quotes = {
-            item.option_right: self._persist_option_snapshot(item) for item in option_quotes
-        }
-
-        # Mark-to-market always precedes indicator and strategy evaluation.
-        self._record_marks(event, option_quotes)
-        if not event.completed_minute_close:
+        # Liquidation marks and Governor boundaries always precede strategy work.
+        self._record_marks(event)
+        if event.completed_close is None:
             return
         contracts = {
-            item.option_right: self._strategy_contract(event.symbol, item)
-            for item in option_quotes
+            right: self._resolve_contract(
+                symbol=event.symbol,
+                option_right=right,
+                spot_price=event.completed_close,
+                chain=event.option_chain,
+            )
+            for right in (OptionRight.CALL, OptionRight.PUT)
         }
         position = self.strategy.positions.get(event.symbol)
         position_bid = None
-        if position is not None:
-            selected = contracts.get(position.option_right)
-            position_bid = selected.bid if selected is not None else None
+        if position is not None and event.option_chain is not None:
+            candidate = self._candidate_by_id(
+                event.option_chain, position.instrument_id
+            )
+            position_bid = candidate.bid if candidate is not None else None
         signal = self.strategy.on_bar(
             symbol=event.symbol,
-            close=event.price,
+            close=event.completed_close,
             timestamp=self.clock.now(),
-            call_contract=contracts.get(OptionRight.CALL),
-            put_contract=contracts.get(OptionRight.PUT),
+            call_contract=contracts[OptionRight.CALL],
+            put_contract=contracts[OptionRight.PUT],
             position_quote_bid=position_bid,
         )
         if signal is None:
             return
-        execution_quote = execution_quotes.get(signal.option_right)
+        execution_quote = execution_quotes.get(signal.instrument_id)
         if execution_quote is None:
             return
         self._route_signal(signal, execution_quote)
 
-    def _persist_underlying_snapshot(self, event: ReplayMarketEvent) -> None:
+    def _persist_underlying_snapshot(self, event: _NormalizedMarketEvent) -> None:
         snapshot_id = self.identities.generate_id(
             "market_snapshot",
             event.instrument_id,
@@ -200,63 +445,93 @@ class ReplayOrchestrator:
                 snapshot_id=snapshot_id,
                 instrument_id=event.instrument_id,
                 captured_at=self.clock.now(),
-                last=event.price,
+                last=event.mark_price,
                 payload={
                     "source": "REPLAY_ORCHESTRATOR",
-                    "symbol": event.symbol,
-                    "completed_minute_close": event.completed_minute_close,
+                    "replay_mode": event.lineage.replay_mode.value,
+                    "source_id": event.lineage.source_id,
+                    "source_kind": event.lineage.source_kind,
+                    "exact_prototype_replay": event.lineage.exact_prototype_replay,
+                    "transformation": event.lineage.transformation,
+                    "completed_close": (
+                        str(event.completed_close)
+                        if event.completed_close is not None
+                        else None
+                    ),
+                    "source_payload": event.source_payload,
                 },
             )
         )
         self._snapshot_ids.append(snapshot_id)
         self.session.flush()
 
-    def _persist_option_snapshot(
-        self, quote: ReplayOptionQuote
-    ) -> ExecutionQuote:
-        snapshot_id = self.identities.generate_id(
-            "market_snapshot",
-            quote.instrument_id,
-            self.clock.now(),
-            parent_id=f"event:{self._event_count}",
-        )
-        self.session.add(
-            MarketSnapshot(
-                snapshot_id=snapshot_id,
-                instrument_id=quote.instrument_id,
-                captured_at=self.clock.now(),
-                bid=quote.bid,
-                ask=quote.ask,
-                last=(quote.bid + quote.ask) / Decimal("2"),
-                payload={
-                    "source": "REPLAY_ORCHESTRATOR",
-                    "bid_size": str(quote.bid_size),
-                    "ask_size": str(quote.ask_size),
-                },
+    def _persist_option_chain(
+        self, chain: ReplayOptionChainEvent | None
+    ) -> dict[UUID, ExecutionQuote]:
+        if chain is None:
+            return {}
+        quotes: dict[UUID, ExecutionQuote] = {}
+        for candidate in chain.candidates:
+            snapshot_id = self.identities.generate_id(
+                "market_snapshot",
+                candidate.instrument_id,
+                self.clock.now(),
+                parent_id=f"event:{self._event_count}",
             )
-        )
-        self._snapshot_ids.append(snapshot_id)
+            self.session.add(
+                MarketSnapshot(
+                    snapshot_id=snapshot_id,
+                    instrument_id=candidate.instrument_id,
+                    captured_at=self.clock.now(),
+                    bid=candidate.bid if candidate.bid > 0 else None,
+                    ask=candidate.ask if candidate.ask > 0 else None,
+                    last=(
+                        (candidate.bid + candidate.ask) / Decimal("2")
+                        if candidate.bid > 0 and candidate.ask > 0
+                        else None
+                    ),
+                    payload={
+                        "source": "REPLAY_OPTION_CHAIN",
+                        "bid_size": str(candidate.bid_size),
+                        "ask_size": str(candidate.ask_size),
+                        "volume": candidate.volume,
+                        "open_interest": candidate.open_interest,
+                        "expiration_date": candidate.expiration_date.isoformat(),
+                        "strike_price": str(candidate.strike_price),
+                        "option_right": candidate.option_right.value,
+                    },
+                )
+            )
+            self._snapshot_ids.append(snapshot_id)
+            if candidate.bid > 0 and candidate.ask > 0:
+                quotes[candidate.instrument_id] = ExecutionQuote(
+                    snapshot_id=snapshot_id,
+                    instrument_id=candidate.instrument_id,
+                    bid=candidate.bid,
+                    ask=candidate.ask,
+                    bid_size=candidate.bid_size,
+                    ask_size=candidate.ask_size,
+                    captured_at=self.clock.now(),
+                    fidelity_tier=LiquidityFidelityTier.TIER_1_QUOTE_DEPTH,
+                )
         self.session.flush()
-        return ExecutionQuote(
-            snapshot_id=snapshot_id,
-            instrument_id=quote.instrument_id,
-            bid=quote.bid,
-            ask=quote.ask,
-            bid_size=quote.bid_size,
-            ask_size=quote.ask_size,
-            captured_at=self.clock.now(),
-            fidelity_tier=LiquidityFidelityTier.TIER_1_QUOTE_DEPTH,
-        )
+        return quotes
 
-    def _record_marks(
-        self,
-        event: ReplayMarketEvent,
-        option_quotes: tuple[ReplayOptionQuote, ...],
-    ) -> None:
-        marks = [(event.instrument_id, event.price)] + [
-            (item.instrument_id, (item.bid + item.ask) / Decimal("2"))
-            for item in option_quotes
-        ]
+    def _record_marks(self, event: _NormalizedMarketEvent) -> None:
+        marks = [(event.instrument_id, event.mark_price)]
+        if event.option_chain is not None:
+            for position in self._position_snapshots():
+                candidate = self._candidate_by_id(
+                    event.option_chain, position.instrument_id
+                )
+                if candidate is None:
+                    continue
+                self._validate_candidate(candidate)
+                liquidation_mark = (
+                    candidate.bid if position.quantity > 0 else candidate.ask
+                )
+                if liquidation_mark > 0:
+                    marks.append((position.instrument_id, liquidation_mark))
         for instrument_id, price in marks:
             self.governor.record_market_mark(
                 MarketMark(
@@ -269,20 +544,55 @@ class ReplayOrchestrator:
                 authorized_cash_usd=self.config.initial_cash_usd,
             )
 
-    def _strategy_contract(
-        self, symbol: str, quote: ReplayOptionQuote
-    ) -> StrategyContract:
-        instrument = self.session.get(Instrument, quote.instrument_id)
-        if instrument is None or instrument.contract_multiplier is None:
-            raise ValueError("replay option lacks canonical instrument identity")
-        return StrategyContract(
-            instrument_id=instrument.instrument_id,
-            underlying_symbol=symbol,
-            option_right=quote.option_right,
-            bid=quote.bid,
-            ask=quote.ask,
-            contract_multiplier=instrument.contract_multiplier,
+    def _resolve_contract(
+        self,
+        *,
+        symbol: str,
+        option_right: OptionRight,
+        spot_price: Decimal,
+        chain: ReplayOptionChainEvent | None,
+    ) -> StrategyContract | None:
+        if chain is None or not chain.candidates:
+            return None
+        expiration = self.expirations.resolve(
+            symbol,
+            tuple(item.expiration_date for item in chain.candidates),
         )
+        resolved = resolve_legacy_option(
+            candidates=tuple(item.resolver_candidate() for item in chain.candidates),
+            underlying_symbol=symbol,
+            expiration_date=expiration,
+            option_right=option_right,
+            spot_price=spot_price,
+            canonical_lookup=self.canonical_lookup,
+        )
+        return self._strategy_contract(resolved) if resolved is not None else None
+
+    @staticmethod
+    def _strategy_contract(resolved: ResolvedOptionContract) -> StrategyContract:
+        return StrategyContract(
+            instrument_id=resolved.instrument_id,
+            underlying_symbol=resolved.underlying_symbol,
+            option_right=resolved.option_right,
+            bid=resolved.bid,
+            ask=resolved.ask,
+            contract_multiplier=resolved.contract_multiplier,
+        )
+
+    @staticmethod
+    def _candidate_by_id(
+        chain: ReplayOptionChainEvent, instrument_id: UUID
+    ) -> ReplayOptionCandidate | None:
+        return next(
+            (item for item in chain.candidates if item.instrument_id == instrument_id),
+            None,
+        )
+
+    def _validate_candidate(self, candidate: ReplayOptionCandidate) -> None:
+        canonical = self.canonical_lookup.get(candidate.instrument_id)
+        if canonical is None:
+            raise ValueError("option-chain instrument is absent or retired")
+        validate_candidate_identity(candidate.resolver_candidate(), canonical)
 
     def _route_signal(
         self, signal: StrategyOrderSignal, quote: ExecutionQuote
@@ -372,7 +682,9 @@ class ReplayOrchestrator:
         if receipt.fill_records:
             self._apply_fills(signal.underlying_symbol, receipt.fill_records)
 
-    def _apply_fills(self, underlying_symbol: str, fills) -> None:
+    def _apply_fills(
+        self, underlying_symbol: str, fills: list[SimulatedFillPayload]
+    ) -> None:
         for fill in fills:
             position = self._position_for_instrument(fill.instrument_id)
             realized = Decimal("0")
@@ -402,6 +714,8 @@ class ReplayOrchestrator:
                     position.quantity = total
                     position.updated_at = self.clock.now()
                 instrument = self.session.get(Instrument, fill.instrument_id)
+                if instrument is None:
+                    raise ValueError("fill lacks canonical instrument identity")
                 self.strategy.record_open(
                     StrategyPosition(
                         instrument_id=fill.instrument_id,
@@ -426,9 +740,6 @@ class ReplayOrchestrator:
                     underlying_symbol, realized_pnl=realized
                 )
             self.session.flush()
-            # Effective fill prices already include modeled slippage. Re-mark the
-            # canonical portfolio after the position mutation so a closed position
-            # cannot leave stale unrealized P&L in the governor state.
             self.governor.record_market_mark(
                 MarketMark(
                     instrument_id=fill.instrument_id,
@@ -470,7 +781,11 @@ class ReplayOrchestrator:
         rows = self.session.execute(
             select(CurrentPosition, Instrument)
             .join(Instrument, Instrument.instrument_id == CurrentPosition.instrument_id)
-            .where(CurrentPosition.quantity != 0)
+            .where(
+                CurrentPosition.cell_id == self.config.cell_id,
+                CurrentPosition.broker_account_id == self.config.broker_account_id,
+                CurrentPosition.quantity != 0,
+            )
         ).all()
         return [self._snapshot(position, instrument) for position, instrument in rows]
 
@@ -503,14 +818,22 @@ class ReplayOrchestrator:
         ]
         decisions = list(
             self.session.scalars(
-                select(RiskDecision).where(RiskDecision.session_id == self.config.session_id)
+                select(RiskDecision).where(
+                    RiskDecision.session_id == self.config.session_id
+                )
             )
         )
-        orders = list(
-            self.session.scalars(
-                select(KairoOrder).where(KairoOrder.intent_id.in_(self._intent_ids))
+        orders = (
+            list(
+                self.session.scalars(
+                    select(KairoOrder).where(
+                        KairoOrder.intent_id.in_(self._intent_ids)
+                    )
+                )
             )
-        ) if self._intent_ids else []
+            if self._intent_ids
+            else []
+        )
         order_ids = [item.kairo_order_id for item in orders]
         models_and_rows.extend(
             [
@@ -598,7 +921,9 @@ class ReplayOrchestrator:
             )
         )
         encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-        return hashlib.sha256(encoded).hexdigest(), tuple(sorted(set(financial_ids), key=str))
+        return hashlib.sha256(encoded).hexdigest(), tuple(
+            sorted(set(financial_ids), key=str)
+        )
 
 
 def _json_value(value: Any) -> Any:
