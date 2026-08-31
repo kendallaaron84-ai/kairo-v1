@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,3 +61,34 @@ class TrustPolicy(Base):
     policy_document: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CellTreasuryConfig(Base):
+    __tablename__ = "cell_treasury_configs"
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('SINGLE_ASSET', 'BASKET', 'INDEX', 'CASH_GOAL')",
+            name="valid_target_type",
+        ),
+        CheckConstraint("config_version > 0", name="positive_config_version"),
+        UniqueConstraint("cell_id", "config_version", name="uq_cell_treasury_version"),
+        Index(
+            "uq_cell_treasury_one_active",
+            "cell_id",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+    config_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False, default="SINGLE_ASSET")
+    target_instrument_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("instruments.instrument_id"), nullable=False
+    )
+    target_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    authorized_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

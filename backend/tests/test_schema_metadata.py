@@ -28,6 +28,10 @@ EXPECTED_TABLES = {
     "risk_state_events",
     "risk_governor_state",
     "risk_instrument_marks",
+    "cell_treasury_configs",
+    "fill_realized_pnl",
+    "siphon_profit_attributions",
+    "siphon_allocations",
 }
 
 

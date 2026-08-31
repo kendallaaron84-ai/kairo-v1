@@ -105,6 +105,10 @@ def test_siphon_to_treasury_order_lineage(db_session: Session) -> None:
     siphon = SiphonEvent(
         siphon_id=uuid4(), cell_id=uuid4(), treasury_code="META",
         amount=Decimal("2.14"), reason_code="PROFIT_SIPHON",
+        policy_id="LEGACY-SIPHON-v0", policy_version="0.0.0",
+        source_fill_ids=[], qualified_profit_usd=Decimal("2.14"),
+        safety_reserve_usd=Decimal("0"), target_treasury_usd=Decimal("0"),
+        replication_pool_usd=Decimal("2.14"), is_synthetic=False,
     )
     db_session.add(siphon)
     db_session.flush()

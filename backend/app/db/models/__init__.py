@@ -1,9 +1,10 @@
 from app.db.models.broker import BrokerAccount, BrokerInstrumentCapability
-from app.db.models.configuration import Instrument, StrategyRegistry, TrustPolicy
+from app.db.models.configuration import CellTreasuryConfig, Instrument, StrategyRegistry, TrustPolicy
 from app.db.models.ledger import (
     BrokerCashSnapshot,
     CellEvent,
     Fill,
+    FillRealizedPnL,
     KairoCapitalAuthorizationRecord,
     KairoOrder,
     MarketSnapshot,
@@ -11,6 +12,8 @@ from app.db.models.ledger import (
     OrderObservation,
     RiskDecision,
     SiphonEvent,
+    SiphonAllocation,
+    SiphonProfitAttribution,
     TrustEvaluation,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
@@ -27,8 +30,10 @@ __all__ = [
     "BrokerInstrumentCapability",
     "CapitalCell",
     "CellEvent",
+    "CellTreasuryConfig",
     "CurrentPosition",
     "Fill",
+    "FillRealizedPnL",
     "Instrument",
     "KairoCapitalAuthorizationRecord",
     "KairoOrder",
@@ -42,6 +47,8 @@ __all__ = [
     "RiskSession",
     "RiskStateEvent",
     "SiphonEvent",
+    "SiphonAllocation",
+    "SiphonProfitAttribution",
     "StrategyRegistry",
     "TrustEvaluation",
     "TrustPolicy",

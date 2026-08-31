@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.configuration import Instrument
 from app.db.models.ledger import (
+    FillRealizedPnL,
     Fill,
     KairoOrder,
     MarketSnapshot,
@@ -688,6 +689,7 @@ class ReplayOrchestrator:
         for fill in fills:
             position = self._position_for_instrument(fill.instrument_id)
             realized = Decimal("0")
+            position_effect = "OPENING"
             if fill.side == "BUY":
                 if position is None:
                     position = CurrentPosition(
@@ -727,6 +729,7 @@ class ReplayOrchestrator:
                     )
                 )
             elif position is not None:
+                position_effect = "CLOSING"
                 realized = realized_round_trip_pnl(
                     entry_price=position.average_price,
                     exit_price=fill.fill_price,
@@ -739,6 +742,22 @@ class ReplayOrchestrator:
                 self.strategy.record_close(
                     underlying_symbol, realized_pnl=realized
                 )
+            self.session.add(
+                FillRealizedPnL(
+                    realization_id=self.identities.generate_id(
+                        "fill_realized_pnl",
+                        fill.instrument_id,
+                        self.clock.now(),
+                        parent_id=fill.fill_id,
+                    ),
+                    fill_id=fill.fill_id,
+                    cell_id=self.config.cell_id,
+                    position_effect=position_effect,
+                    realized_pnl_usd=realized,
+                    source_authority="KAIRO_PNL_TRACKER",
+                    occurred_at=self.clock.now(),
+                )
+            )
             self.session.flush()
             self.governor.record_market_mark(
                 MarketMark(
@@ -856,6 +875,22 @@ class ReplayOrchestrator:
                     list(
                         self.session.scalars(
                             select(Fill).where(Fill.kairo_order_id.in_(order_ids))
+                        )
+                    )
+                    if order_ids
+                    else [],
+                ),
+                (
+                    "fill_realized_pnl",
+                    list(
+                        self.session.scalars(
+                            select(FillRealizedPnL).where(
+                                FillRealizedPnL.fill_id.in_(
+                                    select(Fill.fill_id).where(
+                                        Fill.kairo_order_id.in_(order_ids)
+                                    )
+                                )
+                            )
                         )
                     )
                     if order_ids

@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -46,6 +46,30 @@ class SiphonEvent(Base):
     __tablename__ = "siphon_events"
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_siphon_events_positive_amount"),
+        CheckConstraint(
+            "policy_id = 'LEGACY-SIPHON-v0' OR qualified_profit_usd = "
+            "(safety_reserve_usd + target_treasury_usd + replication_pool_usd)",
+            name="siphon_allocation_sum",
+        ),
+        CheckConstraint(
+            "policy_id = 'LEGACY-SIPHON-v0' OR "
+            "((is_synthetic = false AND broker_account_id IS NOT NULL "
+            "AND settlement_snapshot_id IS NOT NULL "
+            "AND synthetic_settlement_metadata IS NULL) OR "
+            "(is_synthetic = true AND settlement_snapshot_id IS NULL "
+            "AND synthetic_settlement_metadata IS NOT NULL "
+            "AND synthetic_settlement_metadata->>'settlement_evidence_type' = "
+            "'SYNTHETIC_REPLAY_SETTLEMENT' "
+            "AND synthetic_settlement_metadata ? 'synthetic_settled_at' "
+            "AND synthetic_settlement_metadata ? 'replay_session_id' "
+            "AND synthetic_settlement_metadata ? 'model_version'))",
+            name="siphon_provenance_mode",
+        ),
+        ForeignKeyConstraint(
+            ["settlement_snapshot_id", "broker_account_id"],
+            ["broker_cash_snapshots.snapshot_id", "broker_cash_snapshots.broker_account_id"],
+            name="fk_siphon_settlement_broker_account",
+        ),
         Index("ix_siphon_events_cell_occurred", "cell_id", "occurred_at"),
     )
     siphon_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -54,6 +78,92 @@ class SiphonEvent(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    policy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    broker_account_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("broker_accounts.broker_account_id")
+    )
+    settlement_snapshot_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    source_fill_ids: Mapped[list[UUID]] = mapped_column(
+        ARRAY(PGUUID(as_uuid=True)), nullable=False, default=list
+    )
+    qualified_profit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    safety_reserve_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    target_treasury_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    replication_pool_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    target_config_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("cell_treasury_configs.config_id")
+    )
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    synthetic_settlement_metadata: Mapped[dict | None] = mapped_column(JSONB)
+    source_manifest_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class FillRealizedPnL(Base):
+    """Immutable output of canonical fill/position accounting, never recomputed here."""
+
+    __tablename__ = "fill_realized_pnl"
+    __table_args__ = (
+        CheckConstraint(
+            "position_effect IN ('OPENING', 'CLOSING')", name="valid_position_effect"
+        ),
+        CheckConstraint(
+            "position_effect <> 'OPENING' OR realized_pnl_usd = 0",
+            name="opening_realized_pnl_zero",
+        ),
+        UniqueConstraint("fill_id", name="uq_fill_realized_pnl_fill"),
+        Index("ix_fill_realized_pnl_cell_occurred", "cell_id", "occurred_at"),
+    )
+    realization_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    fill_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("fills.fill_id"), nullable=False
+    )
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    position_effect: Mapped[str] = mapped_column(String(16), nullable=False)
+    realized_pnl_usd: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    source_authority: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SiphonProfitAttribution(Base):
+    __tablename__ = "siphon_profit_attributions"
+    __table_args__ = (
+        CheckConstraint("attributed_profit_usd > 0", name="attributed_profit_positive"),
+        Index("ix_siphon_profit_attribution_fill", "source_fill_id"),
+        Index("ix_siphon_profit_attribution_siphon", "siphon_id"),
+    )
+    attribution_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    siphon_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("siphon_events.siphon_id"), nullable=False
+    )
+    source_fill_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("fills.fill_id"), nullable=False
+    )
+    attributed_profit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SiphonAllocation(Base):
+    __tablename__ = "siphon_allocations"
+    __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('SAFETY_RESERVE', 'TARGET_TREASURY', 'REPLICATION_POOL')",
+            name="valid_bucket_type",
+        ),
+        CheckConstraint("allocated_usd > 0", name="allocated_usd_positive"),
+        UniqueConstraint("siphon_id", "bucket_type", name="uq_siphon_allocation_bucket"),
+        Index("ix_siphon_allocations_bucket", "bucket_type"),
+    )
+    allocation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    siphon_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("siphon_events.siphon_id"), nullable=False
+    )
+    bucket_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    allocated_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    unallocated_cash_balance_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class OrderIntent(Base):
