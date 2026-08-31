@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.orm import Session
 
 from app.db.models.broker import BrokerAccount, BrokerInstrumentCapability
@@ -212,6 +212,8 @@ class VerificationReplaySupport:
         orchestrator.replay_research((stream,))
 
     def clean_replay_facts(self) -> None:
+        # Transactional test reset; production UPDATE/DELETE triggers remain enforced.
+        self.session.execute(text("TRUNCATE TABLE fill_realized_pnl"))
         for model in (
             Fill,
             OrderObservation,

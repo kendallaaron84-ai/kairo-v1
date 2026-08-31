@@ -156,6 +156,7 @@ def add_profit(
         submitted_at=at,
     )
     session.add_all([intent, order])
+    session.flush()
     source_snapshot_id = None
     metadata: dict = {}
     if simulated:

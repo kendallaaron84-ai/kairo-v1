@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.db.models.broker import BrokerAccount, BrokerInstrumentCapability
@@ -305,6 +305,9 @@ def research_input(seeded: SeededReplay) -> ResearchReplayInput:
 
 
 def clean_replay_records(session: Session) -> None:
+    # PostgreSQL TRUNCATE is transactional and intentionally bypasses the
+    # immutable-ledger DELETE trigger for this isolated clean-database replay test.
+    session.execute(text("TRUNCATE TABLE fill_realized_pnl"))
     for model in (
         Fill,
         OrderObservation,
