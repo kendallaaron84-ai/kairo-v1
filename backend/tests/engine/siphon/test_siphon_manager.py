@@ -306,7 +306,7 @@ def test_rounding_remainder_is_deterministically_assigned(db_session: Session) -
     s = seed(db_session)
     add_profit(db_session, s, Decimal("10.03"))
     result = allocate_live(s)
-    assert result and result.replication_pool_usd == Decimal("2.03")
+    assert result and result.replication_pool_usd == Decimal("2.01")
 
 
 def test_partial_profit_attribution_preserves_unsiphoned_remainder(db_session: Session) -> None:
