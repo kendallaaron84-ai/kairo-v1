@@ -172,6 +172,7 @@ def add_profit(
             payload={"source": "TEST"},
         )
         session.add(market)
+        session.flush()
         source_snapshot_id = market.snapshot_id
         metadata = {"synthetic": True, "execution_guaranteed": False}
     fill = Fill(
@@ -373,9 +374,9 @@ def test_siphon_does_not_create_treasury_market_order(db_session: Session) -> No
 def test_siphon_does_not_change_risk_governor_session_pnl(db_session: Session) -> None:
     s = seed(db_session)
     add_profit(db_session, s, Decimal("10"))
-    before = list(db_session.execute(select(RiskGovernorState.session_id, RiskGovernorState.session_net_pnl)))
+    before = list(db_session.execute(select(RiskGovernorState.current_session_id, RiskGovernorState.session_net_pnl)))
     allocate_live(s)
-    assert list(db_session.execute(select(RiskGovernorState.session_id, RiskGovernorState.session_net_pnl))) == before
+    assert list(db_session.execute(select(RiskGovernorState.current_session_id, RiskGovernorState.session_net_pnl))) == before
 
 
 def test_paper_profit_can_create_only_synthetic_siphon_evidence(db_session: Session) -> None:

@@ -95,7 +95,9 @@ class SiphonEvent(Base):
         PGUUID(as_uuid=True), ForeignKey("cell_treasury_configs.config_id")
     )
     is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    synthetic_settlement_metadata: Mapped[dict | None] = mapped_column(JSONB)
+    synthetic_settlement_metadata: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
     source_manifest_hash: Mapped[str | None] = mapped_column(String(64))
 
 
