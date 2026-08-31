@@ -255,7 +255,7 @@ def test_partial_allocation_consumption_preserves_unconsumed_remainder(db_sessio
         db_session,
         cell,
         config,
-        quote(db_session, instrument, ask=Decimal("3.00")),
+        quote(db_session, instrument, bid=Decimal("2.99"), ask=Decimal("3.00")),
     )[0]
     consumed = db_session.scalar(
         select(func.sum(TreasuryCashConsumption.consumed_usd)).where(
@@ -282,7 +282,7 @@ def test_actual_fee_above_estimate_never_overdraws_treasury_cash(db_session: Ses
         db_session,
         cell,
         config,
-        quote(db_session, instrument, ask=Decimal("3")),
+        quote(db_session, instrument, bid=Decimal("2.99"), ask=Decimal("3")),
         estimated_fee=Decimal("0.01"),
         actual_fee=Decimal("1.25"),
     )[0]
