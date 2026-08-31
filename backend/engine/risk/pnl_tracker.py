@@ -13,6 +13,12 @@ def net_pnl(
     return realized + unrealized - fees
 
 
+def net_realized_pnl(realized: Decimal, fees: Decimal) -> Decimal:
+    """Canonical settled economic result when no unrealized component remains."""
+
+    return net_pnl(realized, Decimal("0"), fees, Decimal("0"))
+
+
 def realized_round_trip_pnl(
     *,
     entry_price: Decimal,

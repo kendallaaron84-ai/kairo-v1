@@ -130,6 +130,7 @@ def add_profit(
     *,
     effect: str = "CLOSING",
     simulated: bool = False,
+    commission_fee_usd: Decimal = Decimal("0"),
     occurred_at: datetime | None = None,
 ) -> Fill:
     at = occurred_at or (NOW - timedelta(minutes=1))
@@ -187,7 +188,7 @@ def add_profit(
         reference_price=Decimal("1") if simulated else None,
         contract_multiplier=Decimal("100") if simulated else None,
         slippage_usd=Decimal("0") if simulated else None,
-        commission_fee_usd=Decimal("0"),
+        commission_fee_usd=commission_fee_usd,
         is_simulated=simulated,
         liquidity_fidelity_tier="TIER_3_BAR_ONLY" if simulated else None,
         simulation_model="COARSE" if simulated else None,
@@ -478,6 +479,72 @@ def test_database_rejects_siphon_allocation_sum_mismatch(db_session: Session) ->
 def test_treasury_config_rejects_timezone_naive_created_at() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
         CellTreasuryConfigInput(cell_id=uuid4(), target_instrument_id=uuid4(), target_symbol="META", authorized_by="OWNER", created_at=datetime(2026, 1, 1))
+
+
+def test_realized_losses_reduce_siphonable_net_profit(db_session: Session) -> None:
+    s = seed(db_session, settled_cash=Decimal("135"))
+    add_profit(db_session, s, Decimal("20"))
+    add_profit(db_session, s, Decimal("-15"), occurred_at=NOW - timedelta(seconds=30))
+    assert allocate_live(s) is None
+
+
+def test_gross_winners_cannot_be_siphoned_above_net_realized_profit(db_session: Session) -> None:
+    s = seed(db_session, settled_cash=Decimal("300"))
+    add_profit(db_session, s, Decimal("40"))
+    add_profit(db_session, s, Decimal("-22"), occurred_at=NOW - timedelta(seconds=30))
+    result = allocate_live(s)
+    assert result and result.qualified_profit_usd == Decimal("18.00")
+
+
+def test_external_or_excess_settled_cash_cannot_mask_trading_losses(db_session: Session) -> None:
+    s = seed(db_session, settled_cash=Decimal("500"))
+    add_profit(db_session, s, Decimal("50"))
+    add_profit(db_session, s, Decimal("-45"), occurred_at=NOW - timedelta(seconds=30))
+    assert allocate_live(s) is None
+
+
+def test_prior_siphons_reduce_remaining_net_profit_ceiling(db_session: Session) -> None:
+    s = seed(db_session, settled_cash=Decimal("120"))
+    add_profit(db_session, s, Decimal("30"))
+    first = allocate_live(s)
+    assert first and first.qualified_profit_usd == Decimal("20.00")
+    later = BrokerCashSnapshot(
+        snapshot_id=uuid4(),
+        broker_account_id=s.broker_id,
+        broker_cash=Decimal("200"),
+        settled_cash=Decimal("200"),
+        unsettled_cash=Decimal("0"),
+        buying_power=Decimal("200"),
+        currency="USD",
+        captured_at=NOW + timedelta(minutes=2),
+    )
+    db_session.add(later)
+    db_session.flush()
+    second = s.manager.qualify_and_allocate(
+        cell_id=s.cell_id,
+        occurred_at=NOW + timedelta(minutes=3),
+        broker_account_id=s.broker_id,
+        settlement_snapshot_id=later.snapshot_id,
+    )
+    assert second and second.qualified_profit_usd == Decimal("10.00")
+
+
+def test_net_profit_below_threshold_does_not_siphon_despite_large_gross_winners(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("500"))
+    add_profit(db_session, s, Decimal("100"))
+    add_profit(db_session, s, Decimal("-91"), occurred_at=NOW - timedelta(seconds=30))
+    assert allocate_live(s) is None
+
+
+def test_commissions_are_incorporated_exactly_once_in_net_siphon_ceiling(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("300"))
+    add_profit(db_session, s, Decimal("20"), commission_fee_usd=Decimal("2"))
+    result = allocate_live(s)
+    assert result and result.qualified_profit_usd == Decimal("18.00")
 
 
 def test_migration_0011_upgrade_and_downgrade_preserve_existing_lineage(migrated_database: tuple[str, str]) -> None:

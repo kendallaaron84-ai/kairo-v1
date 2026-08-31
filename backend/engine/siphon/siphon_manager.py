@@ -26,6 +26,7 @@ from engine.siphon.models import (
     TargetType,
 )
 from engine.siphon.remainder import allocate_exact_cents, floor_cents
+from engine.risk.pnl_tracker import net_realized_pnl
 
 
 class SiphonManager:
@@ -104,15 +105,15 @@ class SiphonManager:
             metadata=synthetic_settlement_metadata,
         )
         target = self._active_target(cell_id)
-        sources = list(
-            self.session.scalars(
-                select(FillRealizedPnL)
+        settled_rows = list(
+            self.session.execute(
+                select(FillRealizedPnL, Fill)
                 .join(Fill, Fill.fill_id == FillRealizedPnL.fill_id)
                 .where(
                     FillRealizedPnL.cell_id == cell_id,
-                    FillRealizedPnL.position_effect == "CLOSING",
-                    FillRealizedPnL.realized_pnl_usd > 0,
                     FillRealizedPnL.occurred_at <= settlement_cutoff,
+                    FillRealizedPnL.source_authority == "KAIRO_PNL_TRACKER",
+                    Fill.filled_at <= settlement_cutoff,
                     Fill.is_simulated.is_(synthetic),
                     *(
                         [Fill.broker_account_id == broker_account_id]
@@ -124,6 +125,11 @@ class SiphonManager:
                 .with_for_update()
             )
         )
+        sources = [
+            fact
+            for fact, _fill in settled_rows
+            if fact.position_effect == "CLOSING" and fact.realized_pnl_usd > 0
+        ]
         fill_ids = [source.fill_id for source in sources]
         attributed: dict[UUID, Decimal] = {}
         if fill_ids:
@@ -143,6 +149,27 @@ class SiphonManager:
             for source in sources
         ]
         unsiphoned_profit = floor_cents(sum((amount for _, amount in available), Decimal("0")))
+        canonical_net_settled_profit = net_realized_pnl(
+            sum(
+                (fact.realized_pnl_usd for fact, _fill in settled_rows),
+                Decimal("0"),
+            ),
+            sum(
+                (fill.commission_fee_usd for _fact, fill in settled_rows),
+                Decimal("0"),
+            ),
+        )
+        cumulative_prior_siphoned = Decimal(
+            self.session.scalar(
+                select(func.coalesce(func.sum(SiphonEvent.qualified_profit_usd), 0)).where(
+                    SiphonEvent.cell_id == cell_id
+                )
+            )
+            or 0
+        )
+        remaining_net_settled_profit = floor_cents(
+            max(Decimal("0"), canonical_net_settled_profit - cumulative_prior_siphoned)
+        )
         prior_siphon_reserves = Decimal(
             self.session.scalar(
                 select(func.coalesce(func.sum(SiphonAllocation.allocated_usd), 0))
@@ -159,7 +186,12 @@ class SiphonManager:
             - committed_order_cash_usd
             - total_existing_reserved,
         )
-        qualified = floor_cents(max(Decimal("0"), min(unsiphoned_profit, headroom)))
+        qualified = floor_cents(
+            max(
+                Decimal("0"),
+                min(unsiphoned_profit, remaining_net_settled_profit, headroom),
+            )
+        )
         if qualified < self.policy.minimum_siphon_threshold_usd:
             return None
 
@@ -195,6 +227,11 @@ class SiphonManager:
             source_rows=attribution_rows,
             settlement_snapshot_id=settlement_snapshot_id,
             synthetic_metadata=synthetic_settlement_metadata,
+            positive_unattributed_profit=unsiphoned_profit,
+            canonical_net_settled_profit=canonical_net_settled_profit,
+            cumulative_prior_siphoned=cumulative_prior_siphoned,
+            remaining_net_settled_profit=remaining_net_settled_profit,
+            seed_cash_headroom=headroom,
         )
         event = SiphonEvent(
             siphon_id=event_id,
