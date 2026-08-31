@@ -97,6 +97,21 @@ class SiphonManager:
         if committed_order_cash_usd < 0 or existing_reserved_cash_usd < 0:
             raise ValueError("committed and reserved cash cannot be negative")
         synthetic = synthetic_settlement_metadata is not None
+        legacy_count = self.session.scalar(
+            select(func.count())
+            .select_from(SiphonEvent)
+            .where(
+                SiphonEvent.cell_id == cell_id,
+                SiphonEvent.policy_id == "LEGACY-SIPHON-v0",
+            )
+        )
+        if legacy_count:
+            # Legacy rows intentionally have no trustworthy economic-domain
+            # provenance. Do not reclassify them as live or synthetic; block
+            # qualification until their lineage is resolved explicitly.
+            raise ValueError(
+                "cell has LEGACY-SIPHON-v0 rows with unresolved evidence domain"
+            )
         settled_cash, settlement_cutoff = self._settlement_evidence(
             synthetic=synthetic,
             broker_account_id=broker_account_id,
@@ -162,7 +177,9 @@ class SiphonManager:
         cumulative_prior_siphoned = Decimal(
             self.session.scalar(
                 select(func.coalesce(func.sum(SiphonEvent.qualified_profit_usd), 0)).where(
-                    SiphonEvent.cell_id == cell_id
+                    SiphonEvent.cell_id == cell_id,
+                    SiphonEvent.policy_id != "LEGACY-SIPHON-v0",
+                    SiphonEvent.is_synthetic.is_(synthetic),
                 )
             )
             or 0
@@ -174,7 +191,11 @@ class SiphonManager:
             self.session.scalar(
                 select(func.coalesce(func.sum(SiphonAllocation.allocated_usd), 0))
                 .join(SiphonEvent, SiphonEvent.siphon_id == SiphonAllocation.siphon_id)
-                .where(SiphonEvent.cell_id == cell_id)
+                .where(
+                    SiphonEvent.cell_id == cell_id,
+                    SiphonEvent.policy_id != "LEGACY-SIPHON-v0",
+                    SiphonEvent.is_synthetic.is_(synthetic),
+                )
             )
             or 0
         )

@@ -226,6 +226,16 @@ def synthetic_metadata() -> SyntheticSettlementMetadata:
     )
 
 
+def allocate_synthetic(seeded: Seed, *, settled_cash: Decimal, occurred_at: datetime):
+    return seeded.manager.qualify_and_allocate(
+        cell_id=seeded.cell_id,
+        occurred_at=occurred_at,
+        broker_account_id=seeded.broker_id,
+        synthetic_settled_cash_usd=settled_cash,
+        synthetic_settlement_metadata=synthetic_metadata(),
+    )
+
+
 def test_opening_fill_has_zero_siphonable_realized_profit(db_session: Session) -> None:
     s = seed(db_session)
     add_profit(db_session, s, Decimal("0"), effect="OPENING")
@@ -545,6 +555,74 @@ def test_commissions_are_incorporated_exactly_once_in_net_siphon_ceiling(
     add_profit(db_session, s, Decimal("20"), commission_fee_usd=Decimal("2"))
     result = allocate_live(s)
     assert result and result.qualified_profit_usd == Decimal("18.00")
+
+
+def test_synthetic_prior_siphons_do_not_reduce_live_net_profit_ceiling(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("300"))
+    add_profit(db_session, s, Decimal("20"), simulated=True)
+    synthetic = allocate_synthetic(
+        s, settled_cash=Decimal("300"), occurred_at=NOW + timedelta(minutes=1)
+    )
+    assert synthetic and synthetic.qualified_profit_usd == Decimal("20.00")
+    add_profit(db_session, s, Decimal("20"), occurred_at=NOW - timedelta(seconds=30))
+    live = allocate_live(s, occurred_at=NOW + timedelta(minutes=2))
+    assert live and live.qualified_profit_usd == Decimal("20.00")
+
+
+def test_live_prior_siphons_do_not_reduce_synthetic_net_profit_ceiling(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("300"))
+    add_profit(db_session, s, Decimal("20"))
+    live = allocate_live(s)
+    assert live and live.qualified_profit_usd == Decimal("20.00")
+    add_profit(
+        db_session,
+        s,
+        Decimal("20"),
+        simulated=True,
+        occurred_at=NOW - timedelta(seconds=30),
+    )
+    synthetic = allocate_synthetic(
+        s, settled_cash=Decimal("300"), occurred_at=NOW + timedelta(minutes=2)
+    )
+    assert synthetic and synthetic.qualified_profit_usd == Decimal("20.00")
+
+
+def test_synthetic_reserved_allocations_do_not_reduce_live_seed_headroom(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("120"))
+    add_profit(db_session, s, Decimal("50"), simulated=True)
+    synthetic = allocate_synthetic(
+        s, settled_cash=Decimal("150"), occurred_at=NOW + timedelta(minutes=1)
+    )
+    assert synthetic and synthetic.qualified_profit_usd == Decimal("50.00")
+    add_profit(db_session, s, Decimal("20"), occurred_at=NOW - timedelta(seconds=30))
+    live = allocate_live(s, occurred_at=NOW + timedelta(minutes=2))
+    assert live and live.qualified_profit_usd == Decimal("20.00")
+
+
+def test_live_reserved_allocations_do_not_reduce_synthetic_seed_headroom(
+    db_session: Session,
+) -> None:
+    s = seed(db_session, settled_cash=Decimal("150"))
+    add_profit(db_session, s, Decimal("50"))
+    live = allocate_live(s)
+    assert live and live.qualified_profit_usd == Decimal("50.00")
+    add_profit(
+        db_session,
+        s,
+        Decimal("20"),
+        simulated=True,
+        occurred_at=NOW - timedelta(seconds=30),
+    )
+    synthetic = allocate_synthetic(
+        s, settled_cash=Decimal("120"), occurred_at=NOW + timedelta(minutes=2)
+    )
+    assert synthetic and synthetic.qualified_profit_usd == Decimal("20.00")
 
 
 def test_migration_0011_upgrade_and_downgrade_preserve_existing_lineage(migrated_database: tuple[str, str]) -> None:
