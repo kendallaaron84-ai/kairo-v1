@@ -113,15 +113,15 @@ class ReplayOptionCandidate(BaseModel):
     expiration_date: date
     strike_price: Decimal = Field(gt=0)
     option_right: OptionRight
-    contract_symbol: str | None = None
+    contract_symbol: str
     contract_multiplier: Decimal = Field(gt=0)
-    listing_type: str = Field(default="STANDARD", min_length=1)
+    listing_type: str = Field(min_length=1)
     bid: Decimal
     ask: Decimal
     bid_size: Decimal = Field(ge=0)
     ask_size: Decimal = Field(ge=0)
-    volume: int = Field(ge=0)
-    open_interest: int = Field(ge=0)
+    volume: int | None = Field(default=None, ge=0)
+    open_interest: int | None = Field(default=None, ge=0)
 
     def resolver_candidate(self) -> OptionContractCandidate:
         return OptionContractCandidate(
@@ -145,6 +145,7 @@ class ReplayOptionChainEvent(BaseModel):
 
     timestamp: datetime
     underlying_symbol: str = Field(min_length=1)
+    underlying_instrument_id: UUID
     candidates: tuple[ReplayOptionCandidate, ...]
 
     @model_validator(mode="after")
@@ -272,7 +273,7 @@ class ReplayOrchestrator:
             result = stream.provider.replay(stream.observations)
             lineage = result.lineage
             lineages.append(lineage)
-            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol)
+            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol, lineage.instrument_id)
             all_chains.extend(stream.option_chains)
             completed_by_time = {
                 item.completed_at: item for item in result.completed_minutes
@@ -317,7 +318,7 @@ class ReplayOrchestrator:
             result = stream.provider.ingest(stream.events)
             lineage = result.lineage
             lineages.append(lineage)
-            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol)
+            chain_by_time = self._chain_index(stream.option_chains, lineage.symbol, lineage.instrument_id)
             all_chains.extend(stream.option_chains)
             for source_event in result.events:
                 self._require_aware(source_event.timestamp)
@@ -390,12 +391,14 @@ class ReplayOrchestrator:
 
     @staticmethod
     def _chain_index(
-        chains: tuple[ReplayOptionChainEvent, ...], symbol: str
+        chains: tuple[ReplayOptionChainEvent, ...], symbol: str, instrument_id: UUID
     ) -> dict[datetime, ReplayOptionChainEvent]:
         index: dict[datetime, ReplayOptionChainEvent] = {}
         for chain in chains:
             if chain.underlying_symbol != symbol:
                 raise ValueError("option chain does not match replay stream symbol")
+            if chain.underlying_instrument_id != instrument_id:
+                raise ValueError("option chain does not match replay stream instrument")
             if chain.timestamp in index:
                 raise ValueError("duplicate option-chain timestamp for replay stream")
             index[chain.timestamp] = chain

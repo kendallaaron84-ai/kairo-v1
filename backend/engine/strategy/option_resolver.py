@@ -28,8 +28,8 @@ class OptionContractCandidate(BaseModel):
     listing_type: str = Field(default="STANDARD", min_length=1)
     bid: Decimal
     ask: Decimal
-    volume: int = Field(ge=0)
-    open_interest: int = Field(ge=0)
+    volume: int | None = Field(default=None, ge=0)
+    open_interest: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def contract_symbol_is_not_blank(self) -> "OptionContractCandidate":
@@ -52,8 +52,8 @@ class ResolvedOptionContract(BaseModel):
     listing_type: str
     bid: Decimal = Field(gt=0)
     ask: Decimal = Field(gt=0)
-    volume: int = Field(ge=0)
-    open_interest: int = Field(ge=0)
+    volume: int | None = Field(default=None, ge=0)
+    open_interest: int | None = Field(default=None, ge=0)
 
 
 class CanonicalInstrumentLookup(Protocol):
@@ -102,8 +102,11 @@ def is_legacy_eligible(contract: OptionContractCandidate) -> bool:
         and contract.ask <= PREMIUM_CAP
         and contract.ask - contract.bid <= MAX_BID_ASK_SPREAD
         and (
-            contract.volume >= MINIMUM_VOLUME
-            or contract.open_interest >= MINIMUM_OPEN_INTEREST
+            (contract.volume is not None and contract.volume >= MINIMUM_VOLUME)
+            or (
+                contract.open_interest is not None
+                and contract.open_interest >= MINIMUM_OPEN_INTEREST
+            )
         )
     )
 

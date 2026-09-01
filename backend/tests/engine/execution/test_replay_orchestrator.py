@@ -232,6 +232,7 @@ def chain(
     return ReplayOptionChainEvent(
         timestamp=timestamp,
         underlying_symbol="TQQQ",
+        underlying_instrument_id=UNDERLYING_ID,
         candidates=candidates
         or (
             candidate(seeded.call, bid=call_bid, ask=call_ask),

@@ -20,6 +20,11 @@ from app.db.models.ledger import (
     TreasuryRegimeObservation,
     TrustEvaluation,
 )
+from app.db.models.historical import (
+    HistoricalMarketArtifact,
+    HistoricalMarketDataset,
+    HistoricalMarketDatasetSymbol,
+)
 from app.db.models.intelligence import (
     CellIntelligenceAuthorityEvent,
     IntelligenceAuthorityDecision,
@@ -68,6 +73,9 @@ __all__ = [
     "CurrentPosition",
     "Fill",
     "FillRealizedPnL",
+    "HistoricalMarketArtifact",
+    "HistoricalMarketDataset",
+    "HistoricalMarketDatasetSymbol",
     "Instrument",
     "IntelligenceAuthorityDecision",
     "IntelligenceAuthorityProposal",

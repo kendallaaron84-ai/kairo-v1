@@ -158,6 +158,7 @@ class VerificationReplaySupport:
         return ReplayOptionChainEvent(
             timestamp=timestamp,
             underlying_symbol="TQQQ",
+            underlying_instrument_id=self.underlying.instrument_id,
             candidates=candidates
             or (
                 self.candidate(self.call, bid=call_bid, ask=call_ask),

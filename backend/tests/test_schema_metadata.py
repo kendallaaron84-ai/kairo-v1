@@ -60,6 +60,9 @@ EXPECTED_TABLES = {
     "intelligence_authority_proposals",
     "intelligence_authority_decisions",
     "cell_intelligence_authority_events",
+    "historical_market_artifacts",
+    "historical_market_datasets",
+    "historical_market_dataset_symbols",
 }
 
 
