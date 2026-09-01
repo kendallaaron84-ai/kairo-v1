@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import datetime
 from decimal import Decimal
+from typing import Callable
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -32,9 +33,22 @@ from engine.risk.pnl_tracker import net_realized_pnl
 class SiphonManager:
     """Allocates already-computed canonical realized profit; it never computes trade P&L."""
 
-    def __init__(self, session: Session, policy: SiphonPolicyConfig | None = None):
+    def __init__(
+        self,
+        session: Session,
+        policy: SiphonPolicyConfig | None = None,
+        identity_factory: Callable[[str, str], UUID] | None = None,
+    ):
         self.session = session
         self.policy = policy or SiphonPolicyConfig()
+        self.identity_factory = identity_factory
+
+    def _identity(self, record_type: str, stable_key: str) -> UUID:
+        return (
+            self.identity_factory(record_type, stable_key)
+            if self.identity_factory is not None
+            else uuid4()
+        )
 
     def record_canonical_realized_pnl(
         self,
@@ -55,7 +69,8 @@ class SiphonManager:
         if position_effect == "OPENING" and realized_pnl_usd != 0:
             raise ValueError("opening fills cannot realize profit")
         fact = FillRealizedPnL(
-            realization_id=realization_id or uuid4(),
+            realization_id=realization_id
+            or self._identity("fill_realized_pnl", str(fill_id)),
             fill_id=fill_id,
             cell_id=cell_id,
             position_effect=position_effect,
@@ -219,7 +234,9 @@ class SiphonManager:
         allocations = allocate_exact_cents(qualified, self.policy)
         attribution_rows: list[SiphonProfitAttribution] = []
         remaining = qualified
-        event_id = siphon_id or uuid4()
+        event_id = siphon_id or self._identity(
+            "siphon_event", f"{cell_id}:{occurred_at.isoformat()}:{qualified}"
+        )
         for source, source_available in available:
             if remaining == 0:
                 break
@@ -228,7 +245,9 @@ class SiphonManager:
                 continue
             attribution_rows.append(
                 SiphonProfitAttribution(
-                    attribution_id=uuid4(),
+                    attribution_id=self._identity(
+                        "siphon_profit_attribution", f"{event_id}:{source.fill_id}"
+                    ),
                     siphon_id=event_id,
                     source_fill_id=source.fill_id,
                     attributed_profit_usd=amount,
@@ -287,7 +306,9 @@ class SiphonManager:
             running += allocations[bucket]
             self.session.add(
                 SiphonAllocation(
-                    allocation_id=uuid4(),
+                    allocation_id=self._identity(
+                        "siphon_allocation", f"{event_id}:{bucket.value}"
+                    ),
                     siphon_id=event_id,
                     bucket_type=bucket.value,
                     allocated_usd=allocations[bucket],

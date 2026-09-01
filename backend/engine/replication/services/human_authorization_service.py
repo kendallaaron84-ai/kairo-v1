@@ -122,3 +122,7 @@ class HumanAuthorizationService:
         ))
         self.session.flush()
         return authorization
+
+    def authorize_proposal(self, **kwargs: object) -> ReplicationAuthorization:
+        """Step 4 harness name for the existing canonical authorization operation."""
+        return self.authorize(**kwargs)  # type: ignore[arg-type]

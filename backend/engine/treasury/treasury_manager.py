@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -32,12 +32,23 @@ class TreasuryManager:
     """PAPER_ONLY conversion of bound target allocations into fractional holdings."""
 
     def __init__(
-        self, session: Session, policy: TreasuryExecutionPolicyConfig | None = None
+        self,
+        session: Session,
+        policy: TreasuryExecutionPolicyConfig | None = None,
+        identity_factory: Callable[[str, str], UUID] | None = None,
     ) -> None:
         self.session = session
         self.policy = policy or TreasuryExecutionPolicyConfig()
+        self.identity_factory = identity_factory
         if self.policy.clearance != "PAPER_ONLY":
             raise ValueError("Phase 4 Step 2 supports PAPER_ONLY clearance")
+
+    def _identity(self, record_type: str, stable_key: str) -> UUID:
+        return (
+            self.identity_factory(record_type, stable_key)
+            if self.identity_factory is not None
+            else uuid4()
+        )
 
     def execute_available(
         self,
@@ -166,7 +177,10 @@ class TreasuryManager:
         if not gate.allowed:
             self.session.add(
                 TreasuryRegimeObservation(
-                    event_id=uuid4(),
+                    event_id=self._identity(
+                        "treasury_regime_observation",
+                        f"{cell_id}:{config_id}:{snapshot_id}:{occurred_at.isoformat()}:SAFETY_GATE",
+                    ),
                     cell_id=cell_id,
                     event_type="SAFETY_GATE",
                     gate_name=gate.failed_gate or "UNKNOWN",
@@ -202,7 +216,10 @@ class TreasuryManager:
             return None
 
         execution = TreasuryExecution(
-            execution_id=uuid4(),
+            execution_id=self._identity(
+                "treasury_execution",
+                f"{cell_id}:{config_id}:{snapshot_id}:{occurred_at.isoformat()}",
+            ),
             cell_id=cell_id,
             target_config_id=config_id,
             instrument_id=instrument.instrument_id,
@@ -227,7 +244,10 @@ class TreasuryManager:
             if amount <= 0:
                 continue
             row = TreasuryCashConsumption(
-                consumption_id=uuid4(),
+                consumption_id=self._identity(
+                    "treasury_cash_consumption",
+                    f"{execution.execution_id}:{allocation.allocation_id}",
+                ),
                 execution_id=execution.execution_id,
                 allocation_id=allocation.allocation_id,
                 consumed_usd=amount,
@@ -273,7 +293,10 @@ class TreasuryManager:
                 continue
             self.session.add(
                 TreasuryRegimeObservation(
-                    event_id=uuid4(),
+                    event_id=self._identity(
+                        "treasury_regime_observation",
+                        f"{cell_id}:{snapshot_id}:{occurred_at.isoformat()}:{name}",
+                    ),
                     cell_id=cell_id,
                     event_type="MACRO_OBSERVATION",
                     gate_name=name,
@@ -317,7 +340,10 @@ class TreasuryManager:
             )
             if holding is None:
                 holding = OwnershipTreasuryHolding(
-                    holding_id=uuid4(),
+                    holding_id=self._identity(
+                        "ownership_treasury_holding",
+                        f"{cell_id}:{instrument_id}:{is_synthetic}",
+                    ),
                     treasury_code=cell.target_treasury_code,
                     cell_id=cell_id,
                     instrument_id=instrument_id,
