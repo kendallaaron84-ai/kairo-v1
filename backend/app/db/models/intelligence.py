@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -378,3 +379,123 @@ class OrderContextEvaluation(Base):
     counterfactual_opinion: Mapped[str] = mapped_column(String(32), nullable=False)
     veto_reason_code: Mapped[str | None] = mapped_column(String(64))
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class IntelligenceResearchRun(Base):
+    __tablename__ = "intelligence_research_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "research_method = 'TRADE_REMOVAL_COUNTERFACTUAL'",
+            name="ck_research_method_trade_removal",
+        ),
+        CheckConstraint(
+            "sample_end_time >= sample_start_time", name="ck_research_sample_window"
+        ),
+        CheckConstraint(
+            "total_baseline_trades >= 0 AND total_context_evaluated_trades >= 0 "
+            "AND total_veto_opportunities >= 0 "
+            "AND vetoed_losing_trades >= 0 AND vetoed_winning_trades >= 0 "
+            "AND vetoed_breakeven_trades >= 0 "
+            "AND excluded_causal_invalid_trades >= 0",
+            name="ck_research_counts_nonnegative",
+        ),
+        CheckConstraint(
+            "total_context_evaluated_trades <= total_baseline_trades",
+            name="ck_research_eval_le_baseline",
+        ),
+        CheckConstraint(
+            "total_context_evaluated_trades + excluded_causal_invalid_trades "
+            "<= total_baseline_trades",
+            name="ck_research_attributed_le_baseline",
+        ),
+        CheckConstraint(
+            "total_veto_opportunities <= total_context_evaluated_trades",
+            name="ck_research_veto_le_eval",
+        ),
+        CheckConstraint(
+            "vetoed_losing_trades + vetoed_winning_trades "
+            "+ vetoed_breakeven_trades = total_veto_opportunities",
+            name="ck_research_veto_sum_exact",
+        ),
+        CheckConstraint(
+            "losses_avoided_usd >= 0 AND profits_forfeited_usd >= 0 "
+            "AND baseline_max_drawdown_usd >= 0 "
+            "AND counterfactual_max_drawdown_usd >= 0",
+            name="ck_research_financials_nonnegative",
+        ),
+        CheckConstraint(
+            "net_alpha_usd = losses_avoided_usd - profits_forfeited_usd",
+            name="ck_research_net_alpha_exact",
+        ),
+        CheckConstraint(
+            "veto_precision_pct >= 0.00 AND veto_precision_pct <= 100.00",
+            name="ck_research_precision_range",
+        ),
+        CheckConstraint(
+            "research_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_research_manifest_sha256",
+        ),
+        Index("idx_research_cell_executed", "cell_id", "executed_at"),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cell_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id")
+    )
+    research_method: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="TRADE_REMOVAL_COUNTERFACTUAL",
+        server_default="TRADE_REMOVAL_COUNTERFACTUAL",
+    )
+    sample_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    total_baseline_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_context_evaluated_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_veto_opportunities: Mapped[int] = mapped_column(Integer, nullable=False)
+    vetoed_losing_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    vetoed_winning_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    vetoed_breakeven_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    excluded_causal_invalid_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_net_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    counterfactual_net_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    losses_avoided_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    profits_forfeited_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    net_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    baseline_max_drawdown_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    counterfactual_max_drawdown_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    veto_precision_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    research_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class IntelligenceResearchCategorySlice(Base):
+    __tablename__ = "intelligence_research_category_slices"
+    __table_args__ = (
+        CheckConstraint("vetoed_trades_count >= 0", name="ck_slice_trades_pos"),
+        CheckConstraint(
+            "losses_avoided_usd >= 0 AND profits_forfeited_usd >= 0",
+            name="ck_slice_financials_nonnegative",
+        ),
+        CheckConstraint(
+            "slice_net_alpha_usd = losses_avoided_usd - profits_forfeited_usd",
+            name="ck_slice_net_alpha_exact",
+        ),
+        CheckConstraint(
+            "slice_precision_pct >= 0.00 AND slice_precision_pct <= 100.00",
+            name="ck_slice_precision_range",
+        ),
+        UniqueConstraint(
+            "run_id", "category_code", name="uq_research_run_category"
+        ),
+        Index("idx_category_slices_run_id", "run_id"),
+    )
+
+    slice_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("intelligence_research_runs.run_id"), nullable=False
+    )
+    category_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    vetoed_trades_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    losses_avoided_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    profits_forfeited_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    slice_net_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    slice_precision_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)

@@ -28,6 +28,8 @@ from app.db.models.intelligence import (
     IntelligenceFindingCitation,
     IntelligenceInvestigationCase,
     IntelligenceRawArtifact,
+    IntelligenceResearchCategorySlice,
+    IntelligenceResearchRun,
     MarketContextAssessment,
     OrderContextEvaluation,
 )
@@ -68,6 +70,8 @@ __all__ = [
     "IntelligenceFindingCitation",
     "IntelligenceInvestigationCase",
     "IntelligenceRawArtifact",
+    "IntelligenceResearchCategorySlice",
+    "IntelligenceResearchRun",
     "MarketContextAssessment",
     "KairoCapitalAuthorizationRecord",
     "KairoOrder",
