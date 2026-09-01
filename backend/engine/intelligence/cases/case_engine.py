@@ -133,12 +133,19 @@ class CaseEngine:
             .order_by(IntelligenceFindingCitation.event_id)
         ))
         event_ids = {citation.event_id for citation in citations}
-        evidence_hashes = dict(self.db.execute(
-            select(
-                IntelligenceEvidenceLedger.event_id,
-                IntelligenceEvidenceLedger.raw_content_sha256,
-            ).where(IntelligenceEvidenceLedger.event_id.in_(event_ids))
-        )) if event_ids else {}
+        evidence_hashes = (
+            {
+                event_id: content_hash
+                for event_id, content_hash in self.db.execute(
+                    select(
+                        IntelligenceEvidenceLedger.event_id,
+                        IntelligenceEvidenceLedger.raw_content_sha256,
+                    ).where(IntelligenceEvidenceLedger.event_id.in_(event_ids))
+                )
+            }
+            if event_ids
+            else {}
+        )
         if set(evidence_hashes) != event_ids:
             raise ValueError("case contains a citation without canonical evidence")
 
