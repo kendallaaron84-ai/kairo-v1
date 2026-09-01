@@ -182,6 +182,7 @@ class ReplayRunResult(BaseModel):
     financial_ids: tuple[UUID, ...]
     event_count: int
     lineage: tuple[MarketDataLineage, ...]
+    missing_execution_evidence: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class ReplayOrchestrator:
         self._snapshot_ids: list[UUID] = []
         self._intent_ids: list[UUID] = []
         self._event_count = 0
+        self._missing_execution_evidence: list[dict[str, str]] = []
 
     def initialize(self) -> None:
         state = self.governor.initialize_session(
@@ -357,6 +359,7 @@ class ReplayOrchestrator:
             financial_ids=ids,
             event_count=self._event_count,
             lineage=tuple(lineages),
+            missing_execution_evidence=tuple(self._missing_execution_evidence),
         )
 
     def _persist_manifest(self, manifest_hash: str, ids: tuple[UUID, ...]) -> UUID:
@@ -461,6 +464,13 @@ class ReplayOrchestrator:
             position_quote_bid=position_bid,
         )
         if signal is None:
+            if self.strategy.last_missing_execution_evidence is not None:
+                self._missing_execution_evidence.append({
+                    "timestamp": self.clock.now().isoformat(),
+                    "symbol": event.symbol,
+                    "reason": "INSUFFICIENT_EXECUTION_EVIDENCE",
+                    "detail": self.strategy.last_missing_execution_evidence,
+                })
             return
         execution_quote = execution_quotes.get(signal.instrument_id)
         if execution_quote is None:

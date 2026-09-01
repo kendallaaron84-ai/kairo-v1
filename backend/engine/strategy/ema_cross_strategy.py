@@ -70,6 +70,7 @@ class EMACrossStrategy:
         self._positions: dict[str, StrategyPosition] = {}
         self.consecutive_losses = 0
         self.entries_halted = False
+        self.last_missing_execution_evidence: str | None = None
 
     @property
     def positions(self) -> dict[str, StrategyPosition]:
@@ -99,6 +100,7 @@ class EMACrossStrategy:
         put_contract: StrategyContract | None = None,
         position_quote_bid: Decimal | None = None,
     ) -> StrategyOrderSignal | None:
+        self.last_missing_execution_evidence = None
         if symbol not in self._indicators:
             raise ValueError(f"unsupported frozen symbol: {symbol}")
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -115,6 +117,7 @@ class EMACrossStrategy:
             contract = call_contract if position.option_right is OptionRight.CALL else put_contract
             bid = position_quote_bid or (contract.bid if contract is not None else None)
             if bid is None or bid <= 0:
+                self.last_missing_execution_evidence = "POSITION_EXIT_QUOTE_MISSING"
                 return None
             reason: StrategySignalReason | None = None
             purpose = OrderPurpose.EMERGENCY_EXIT
@@ -165,6 +168,7 @@ class EMACrossStrategy:
         else:
             return None
         if contract is None or contract.underlying_symbol != symbol:
+            self.last_missing_execution_evidence = "ENTRY_OPTION_QUOTE_MISSING"
             return None
         quantity = (
             self.slot_size / (contract.ask * contract.contract_multiplier)
