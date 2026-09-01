@@ -392,14 +392,17 @@ def test_migration_0017_upgrade_and_downgrade_are_clean_and_data_safe(
         columns = {column["name"] for column in sa_inspect(engine).get_columns("intelligence_evidence_ledger")}
         assert {"release_status", "referenced_event_id"} <= columns
 
-        _insert_lifecycle_rows(engine, status="SCHEDULED", with_reference=False)
-        with pytest.raises(Exception, match="lifecycle lineage"):
-            command.downgrade(config, "0016")
+        for lifecycle_status in ("SCHEDULED", "REVISED"):
+            _insert_lifecycle_rows(
+                engine, status=lifecycle_status, with_reference=False
+            )
+            with pytest.raises(Exception, match="lifecycle lineage"):
+                command.downgrade(config, "0016")
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "TRUNCATE intelligence_entity_links, intelligence_evidence_ledger, intelligence_raw_artifacts CASCADE"
+                ))
 
-        with engine.begin() as connection:
-            connection.execute(text(
-                "TRUNCATE intelligence_entity_links, intelligence_evidence_ledger, intelligence_raw_artifacts CASCADE"
-            ))
         _insert_lifecycle_rows(engine, status="RELEASED", with_reference=True)
         with pytest.raises(Exception, match="lifecycle lineage"):
             command.downgrade(config, "0016")
