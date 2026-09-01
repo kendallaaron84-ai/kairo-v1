@@ -44,6 +44,9 @@ EXPECTED_TABLES = {
     "replication_authorizations",
     "replication_cash_consumptions",
     "cell_genesis_events",
+    "intelligence_raw_artifacts",
+    "intelligence_evidence_ledger",
+    "intelligence_entity_links",
 }
 
 
