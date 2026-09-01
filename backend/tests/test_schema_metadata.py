@@ -57,6 +57,9 @@ EXPECTED_TABLES = {
     "intelligence_research_category_slices",
     "intelligence_stateful_replay_runs",
     "stateful_replay_session_deltas",
+    "intelligence_authority_proposals",
+    "intelligence_authority_decisions",
+    "cell_intelligence_authority_events",
 }
 
 

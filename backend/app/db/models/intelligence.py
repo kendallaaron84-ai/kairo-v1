@@ -609,3 +609,79 @@ class StatefulReplaySessionDelta(Base):
     counterfactual_halted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     vetoed_in_session_count: Mapped[int] = mapped_column(Integer, nullable=False)
     induced_in_session_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class IntelligenceAuthorityProposal(Base):
+    __tablename__ = "intelligence_authority_proposals"
+    __table_args__ = (
+        CheckConstraint("target_authority = 'VETO_ONLY'", name="ck_proposal_target_authority_veto"),
+        CheckConstraint("policy_version = 'INTEL-VETO-MACRO-v1'", name="ck_proposal_policy_version"),
+        CheckConstraint("evaluated_veto_opportunities >= 0", name="ck_proposal_veto_opps_pos"),
+        CheckConstraint("distinct_trading_months >= 0", name="ck_proposal_months_pos"),
+        CheckConstraint("sample_end_time >= sample_start_time", name="ck_proposal_window"),
+        CheckConstraint("veto_precision_pct >= 0.00 AND veto_precision_pct <= 100.00", name="ck_proposal_precision_range"),
+        CheckConstraint("proposal_manifest_sha256 ~ '^[0-9a-f]{64}$'", name="ck_proposal_manifest_sha256"),
+        UniqueConstraint("step5_run_id", "step5_5_run_id", "policy_version", name="uq_authority_proposal_evidence_policy"),
+        Index("idx_auth_proposals_cell", "cell_id", "proposed_at"),
+    )
+
+    proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False)
+    target_authority: Mapped[str] = mapped_column(String(32), nullable=False, default="VETO_ONLY", server_default="VETO_ONLY")
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    step5_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("intelligence_research_runs.run_id"), nullable=False)
+    step5_5_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("intelligence_stateful_replay_runs.replay_run_id"), nullable=False)
+    evaluated_veto_opportunities: Mapped[int] = mapped_column(Integer, nullable=False)
+    distinct_trading_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trade_removal_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    stateful_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    drawdown_reduction_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    veto_precision_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    criteria_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    proposal_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class IntelligenceAuthorityDecision(Base):
+    __tablename__ = "intelligence_authority_decisions"
+    __table_args__ = (
+        CheckConstraint("decision IN ('APPROVED', 'REJECTED')", name="ck_authority_decision_valid"),
+        CheckConstraint("btrim(operator_identity) <> ''", name="ck_authority_decision_operator"),
+        CheckConstraint("approved_proposal_manifest_sha256 ~ '^[0-9a-f]{64}$'", name="ck_decision_proposal_manifest_sha256"),
+        CheckConstraint("decision_manifest_sha256 ~ '^[0-9a-f]{64}$'", name="ck_decision_manifest_sha256"),
+        Index("idx_auth_decisions_proposal", "proposal_id"),
+    )
+
+    decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("intelligence_authority_proposals.proposal_id"), unique=True, nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    operator_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    approved_proposal_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CellIntelligenceAuthorityEvent(Base):
+    __tablename__ = "cell_intelligence_authority_events"
+    __table_args__ = (
+        CheckConstraint("event_type IN ('GRANTED', 'REVOKED', 'EXPIRED')", name="ck_authority_event_type"),
+        CheckConstraint("authority_mode IN ('OBSERVE_ONLY', 'VETO_ONLY')", name="ck_authority_event_mode"),
+        CheckConstraint("policy_version = 'INTEL-VETO-MACRO-v1'", name="ck_authority_event_policy"),
+        CheckConstraint("btrim(operator_identity) <> ''", name="ck_authority_event_operator"),
+        CheckConstraint("event_manifest_sha256 ~ '^[0-9a-f]{64}$'", name="ck_authority_event_manifest_sha256"),
+        UniqueConstraint("decision_id", name="uq_authority_event_decision"),
+        Index("idx_auth_events_cell_eff", "cell_id", "effective_at", "created_at"),
+    )
+
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cell_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False)
+    decision_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("intelligence_authority_decisions.decision_id"))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    authority_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
