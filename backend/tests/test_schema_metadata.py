@@ -63,6 +63,11 @@ EXPECTED_TABLES = {
     "historical_market_artifacts",
     "historical_market_datasets",
     "historical_market_dataset_symbols",
+    "historical_validation_runs",
+    "historical_validation_regime_slices",
+    "historical_session_distribution_facts",
+    "historical_validation_performance_bands",
+    "historical_run_analog_vectors",
 }
 
 

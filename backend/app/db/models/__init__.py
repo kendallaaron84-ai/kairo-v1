@@ -59,6 +59,13 @@ from app.db.models.risk import (
     RiskSession,
     RiskStateEvent,
 )
+from app.db.models.scorecards import (
+    HistoricalRunAnalogVector,
+    HistoricalSessionDistributionFact,
+    HistoricalValidationPerformanceBand,
+    HistoricalValidationRegimeSlice,
+    HistoricalValidationRun,
+)
 
 __all__ = [
     "BrokerAccount",
@@ -76,6 +83,11 @@ __all__ = [
     "HistoricalMarketArtifact",
     "HistoricalMarketDataset",
     "HistoricalMarketDatasetSymbol",
+    "HistoricalRunAnalogVector",
+    "HistoricalSessionDistributionFact",
+    "HistoricalValidationPerformanceBand",
+    "HistoricalValidationRegimeSlice",
+    "HistoricalValidationRun",
     "Instrument",
     "IntelligenceAuthorityDecision",
     "IntelligenceAuthorityProposal",
