@@ -47,6 +47,10 @@ EXPECTED_TABLES = {
     "intelligence_raw_artifacts",
     "intelligence_evidence_ledger",
     "intelligence_entity_links",
+    "intelligence_investigation_cases",
+    "intelligence_case_findings",
+    "intelligence_finding_citations",
+    "intelligence_case_conclusions",
 }
 
 

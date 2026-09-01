@@ -21,8 +21,12 @@ from app.db.models.ledger import (
     TrustEvaluation,
 )
 from app.db.models.intelligence import (
+    IntelligenceCaseConclusion,
+    IntelligenceCaseFinding,
     IntelligenceEntityLink,
     IntelligenceEvidenceLedger,
+    IntelligenceFindingCitation,
+    IntelligenceInvestigationCase,
     IntelligenceRawArtifact,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
@@ -55,8 +59,12 @@ __all__ = [
     "Fill",
     "FillRealizedPnL",
     "Instrument",
+    "IntelligenceCaseConclusion",
+    "IntelligenceCaseFinding",
     "IntelligenceEntityLink",
     "IntelligenceEvidenceLedger",
+    "IntelligenceFindingCitation",
+    "IntelligenceInvestigationCase",
     "IntelligenceRawArtifact",
     "KairoCapitalAuthorizationRecord",
     "KairoOrder",
