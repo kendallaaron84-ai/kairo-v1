@@ -62,6 +62,7 @@ from app.db.models.risk import (
 from app.db.models.scorecards import (
     HistoricalRunAnalogVector,
     HistoricalSessionDistributionFact,
+    HistoricalValidationConfidenceLedger,
     HistoricalValidationPerformanceBand,
     HistoricalValidationRegimeSlice,
     HistoricalValidationRun,
@@ -85,6 +86,7 @@ __all__ = [
     "HistoricalMarketDatasetSymbol",
     "HistoricalRunAnalogVector",
     "HistoricalSessionDistributionFact",
+    "HistoricalValidationConfidenceLedger",
     "HistoricalValidationPerformanceBand",
     "HistoricalValidationRegimeSlice",
     "HistoricalValidationRun",

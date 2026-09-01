@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
-from sqlalchemy import ARRAY, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import ARRAY, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
@@ -43,3 +43,58 @@ class HistoricalRunAnalogVector(Base):
     __tablename__="historical_run_analog_vectors"
     __table_args__=(CheckConstraint("cohort_type IN ('WINNING','LOSING','NEUTRAL')",name="analog_cohort_type"),UniqueConstraint("validation_run_id","session_date",name="uq_run_analog_session"),Index("idx_analog_vectors_run_cohort","validation_run_id","cohort_type"))
     vector_id:Mapped[UUID]=mapped_column(PGUUID(as_uuid=True),primary_key=True); validation_run_id:Mapped[UUID]=mapped_column(PGUUID(as_uuid=True),ForeignKey("historical_validation_runs.validation_run_id"),nullable=False); session_date:Mapped[date]=mapped_column(Date,nullable=False); cohort_type:Mapped[str]=mapped_column(String(16),nullable=False); raw_feature_vector_json:Mapped[dict]=mapped_column(JSONB,nullable=False); normalized_z_vector_json:Mapped[dict]=mapped_column(JSONB,nullable=False); normalization_parameters_json:Mapped[dict]=mapped_column(JSONB,nullable=False); daily_pnl_usd:Mapped[Decimal]=mapped_column(Numeric(12,2),nullable=False); max_drawdown_usd:Mapped[Decimal]=mapped_column(Numeric(12,2),nullable=False); trade_count:Mapped[int]=mapped_column(Integer,nullable=False); win_rate_pct:Mapped[Decimal]=mapped_column(Numeric(5,2),nullable=False)
+
+
+class HistoricalValidationConfidenceLedger(Base):
+    __tablename__ = "historical_validation_confidence_ledgers"
+    __table_args__ = (
+        CheckConstraint("confidence_tier IN ('HIGH_CONFIDENCE','MODERATE_CONFIDENCE','LOW_CONFIDENCE')", name="confidence_tier_category"),
+        CheckConstraint("composite_confidence_score >= 0.00 AND composite_confidence_score <= 100.00", name="composite_score_range"),
+        CheckConstraint("(composite_confidence_score >= 80.00 AND confidence_tier = 'HIGH_CONFIDENCE') OR (composite_confidence_score >= 65.00 AND composite_confidence_score < 80.00 AND confidence_tier = 'MODERATE_CONFIDENCE') OR (composite_confidence_score < 65.00 AND confidence_tier = 'LOW_CONFIDENCE')", name="confidence_tier_score_parity"),
+        CheckConstraint("(gate_eligible = TRUE AND composite_confidence_score >= 80.00 AND hard_gate_passed = TRUE) OR (gate_eligible = FALSE AND (composite_confidence_score < 80.00 OR hard_gate_passed = FALSE))", name="gate_eligibility_dual_key_parity"),
+        CheckConstraint("confidence_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="conf_manifest_sha256_format"),
+        UniqueConstraint("validation_run_id", name="uq_conf_validation_run"),
+        Index("idx_confidence_gate_lookup", "gate_eligible", "hard_gate_passed", "confidence_tier"),
+    )
+
+    confidence_ledger_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    validation_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("historical_validation_runs.validation_run_id"), nullable=False)
+    confidence_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    liquidity_fidelity_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    sample_size_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    sample_size_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    sample_size_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_size_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    regime_coverage_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    regime_coverage_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    regime_coverage_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    regime_coverage_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    data_completeness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    data_completeness_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    data_completeness_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    data_completeness_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    execution_realism_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    execution_realism_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_realism_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_realism_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    oos_stability_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    oos_stability_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    oos_stability_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    oos_stability_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    profit_distribution_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    profit_distribution_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    profit_distribution_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    profit_distribution_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+    context_alignment_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    context_alignment_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    context_alignment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    context_alignment_reasons: Mapped[list[str]] = mapped_column(ARRAY(String(64)), nullable=False)
+
+    composite_confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    confidence_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    hard_gate_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    gate_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    hard_gate_evaluations_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    confidence_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
