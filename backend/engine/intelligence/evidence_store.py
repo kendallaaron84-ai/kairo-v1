@@ -96,6 +96,7 @@ class EvidenceStore:
             raw_content_sha256=content_hash,
             release_status=payload.release_status.value,
             referenced_event_id=payload.referenced_event_id,
+            effective_at=payload.effective_at or payload.published_at,
             created_at=now,
         )
         self.db.add(evidence)

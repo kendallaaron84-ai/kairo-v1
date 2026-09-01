@@ -48,6 +48,7 @@ class FederalReserveAdapter(BaseFeedAdapter):
                         published_at=aware_datetime(
                             str(row.get("published_at") or at.isoformat())
                         ),
+                        effective_at=at,
                         status=ReleaseStatus.SCHEDULED,
                         raw=calendar.content,
                         source_uri=self.calendar_url,
@@ -62,6 +63,7 @@ class FederalReserveAdapter(BaseFeedAdapter):
                         title=str(row.get("title") or "FOMC policy statement"),
                         summary=str(row["official_text"]),
                         published_at=aware_datetime(str(row["published_at"])),
+                        effective_at=aware_datetime(str(row["published_at"])),
                         status=ReleaseStatus.RELEASED,
                         raw=statements.content,
                         source_uri=self.statements_url,
@@ -75,6 +77,7 @@ class FederalReserveAdapter(BaseFeedAdapter):
         title: str,
         summary: str,
         published_at: datetime,
+        effective_at: datetime,
         status: ReleaseStatus,
         raw: bytes,
         source_uri: str,
@@ -87,6 +90,7 @@ class FederalReserveAdapter(BaseFeedAdapter):
             title=title,
             summary=summary,
             published_at=published_at,
+            effective_at=effective_at,
             observed_at=self.observed_clock(),
             impact_scope=ImpactScope.MARKET,
             urgency=UrgencyLevel.CRITICAL,

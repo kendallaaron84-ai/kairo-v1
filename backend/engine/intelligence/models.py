@@ -96,13 +96,16 @@ class IntelligenceIngestPayload(BaseModel):
     time_horizon: TimeHorizon
     release_status: ReleaseStatus = ReleaseStatus.RELEASED
     referenced_event_id: UUID | None = None
+    effective_at: datetime | None = None
     raw_content_bytes: bytes = Field(min_length=1)
     mime_type: str = Field(default="text/plain", min_length=1, max_length=64)
     entity_links: tuple[EntityLinkPayload, ...] = ()
 
-    @field_validator("published_at", "observed_at")
+    @field_validator("published_at", "observed_at", "effective_at")
     @classmethod
-    def validate_timezone(cls, value: datetime) -> datetime:
+    def validate_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return value
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("datetime fields must be timezone-aware")
         return value

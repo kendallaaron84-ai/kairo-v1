@@ -107,6 +107,7 @@ class CorporateIrAdapter(BaseFeedAdapter):
                         title=title,
                         summary=summary,
                         published_at=aware_datetime(str(row["published_at"])),
+                        effective_at=aware_datetime(str(row["published_at"])),
                         observed_at=self.observed_clock(),
                         impact_scope=ImpactScope.COMPANY,
                         urgency=(

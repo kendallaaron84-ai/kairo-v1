@@ -64,6 +64,7 @@ class BlsAdapter(BaseFeedAdapter):
             title=str(row.get("title") or f"{series_id} scheduled release"),
             summary=f"Official BLS calendar notice; scheduled_release_at={scheduled.isoformat()}",
             published_at=aware_datetime(str(row.get("published_at") or scheduled.isoformat())),
+            effective_at=scheduled,
             status=ReleaseStatus.SCHEDULED,
             raw=raw,
             source_uri=self.schedule_url,
@@ -86,6 +87,7 @@ class BlsAdapter(BaseFeedAdapter):
             title=str(row.get("title") or f"{series_id} official release"),
             summary=summary,
             published_at=aware_datetime(str(row["published_at"])),
+            effective_at=aware_datetime(str(row["published_at"])),
             status=(
                 ReleaseStatus.REVISED
                 if row.get("official_revision") is not None
@@ -102,6 +104,7 @@ class BlsAdapter(BaseFeedAdapter):
         title: str,
         summary: str,
         published_at: datetime,
+        effective_at: datetime,
         status: ReleaseStatus,
         raw: bytes,
         source_uri: str,
@@ -115,6 +118,7 @@ class BlsAdapter(BaseFeedAdapter):
             title=title,
             summary=summary,
             published_at=published_at,
+            effective_at=effective_at,
             observed_at=self.observed_clock(),
             impact_scope=ImpactScope.MARKET,
             urgency=UrgencyLevel.CRITICAL if series_id == "CPI" else UrgencyLevel.HIGH,

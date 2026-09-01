@@ -101,6 +101,7 @@ class SecEdgarAdapter(BaseFeedAdapter):
                     title=f"{self.ticker} {form} {accession}",
                     summary=f"Official SEC {form} filing; accessionNumber={accession}",
                     published_at=aware_datetime(str(filing_date)),
+                    effective_at=aware_datetime(str(filing_date)),
                     observed_at=self.observed_clock(),
                     impact_scope=ImpactScope.COMPANY,
                     urgency=UrgencyLevel.HIGH if form == "8-K" else UrgencyLevel.MEDIUM,

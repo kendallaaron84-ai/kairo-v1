@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -95,6 +96,7 @@ class IntelligenceEvidenceLedger(Base):
         Index("idx_evidence_event_type", "event_type"),
         Index("idx_evidence_release_status", "release_status"),
         Index("idx_evidence_referenced_event", "referenced_event_id"),
+        Index("idx_evidence_effective_at", "effective_at"),
     )
 
     event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -117,6 +119,9 @@ class IntelligenceEvidenceLedger(Base):
     )
     referenced_event_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("intelligence_evidence_ledger.event_id")
+    )
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -293,3 +298,83 @@ class IntelligenceCaseConclusion(Base):
     synthesis_summary: Mapped[str] = mapped_column(Text, nullable=False)
     case_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MarketContextAssessment(Base):
+    __tablename__ = "market_context_assessments"
+    __table_args__ = (
+        CheckConstraint(
+            "risk_posture IN ('NORMAL', 'ELEVATED', 'HIGH_EVENT_RISK', 'CRITICAL')",
+            name="ck_context_risk_posture",
+        ),
+        CheckConstraint(
+            "authority_mode = 'OBSERVE_ONLY'",
+            name="ck_context_authority_mode_observe_only",
+        ),
+        CheckConstraint(
+            "assessment_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_context_manifest_sha256",
+        ),
+        CheckConstraint(
+            "(macro_window_active = true AND primary_event_id IS NOT NULL) "
+            "OR macro_window_active = false",
+            name="ck_context_macro_event_lineage",
+        ),
+        Index("idx_context_cell_evaluated", "cell_id", "evaluated_at"),
+    )
+
+    assessment_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    risk_posture: Mapped[str] = mapped_column(String(32), nullable=False)
+    authority_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="OBSERVE_ONLY", server_default="OBSERVE_ONLY"
+    )
+    macro_window_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    primary_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("intelligence_evidence_ledger.event_id")
+    )
+    active_case_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("intelligence_investigation_cases.case_id")
+    )
+    assessment_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    assessment_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OrderContextEvaluation(Base):
+    __tablename__ = "order_context_evaluations"
+    __table_args__ = (
+        CheckConstraint(
+            "counterfactual_opinion IN "
+            "('WOULD_HAVE_AUTHORIZED', 'WOULD_HAVE_VETOED', 'NO_OPINION')",
+            name="ck_order_context_opinion",
+        ),
+        CheckConstraint(
+            "(counterfactual_opinion = 'WOULD_HAVE_VETOED' "
+            "AND veto_reason_code IS NOT NULL) "
+            "OR (counterfactual_opinion <> 'WOULD_HAVE_VETOED')",
+            name="ck_veto_opinion_requires_reason",
+        ),
+        Index("idx_evaluations_intent_id", "intent_id"),
+    )
+
+    evaluation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    intent_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("order_intents.intent_id"),
+        unique=True,
+        nullable=False,
+    )
+    assessment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_context_assessments.assessment_id"),
+        nullable=False,
+    )
+    counterfactual_opinion: Mapped[str] = mapped_column(String(32), nullable=False)
+    veto_reason_code: Mapped[str | None] = mapped_column(String(64))
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

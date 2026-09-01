@@ -51,6 +51,8 @@ EXPECTED_TABLES = {
     "intelligence_case_findings",
     "intelligence_finding_citations",
     "intelligence_case_conclusions",
+    "market_context_assessments",
+    "order_context_evaluations",
 }
 
 

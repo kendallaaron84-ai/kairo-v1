@@ -28,6 +28,8 @@ from app.db.models.intelligence import (
     IntelligenceFindingCitation,
     IntelligenceInvestigationCase,
     IntelligenceRawArtifact,
+    MarketContextAssessment,
+    OrderContextEvaluation,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
 from app.db.models.replication import (
@@ -66,10 +68,12 @@ __all__ = [
     "IntelligenceFindingCitation",
     "IntelligenceInvestigationCase",
     "IntelligenceRawArtifact",
+    "MarketContextAssessment",
     "KairoCapitalAuthorizationRecord",
     "KairoOrder",
     "MarketSnapshot",
     "OrderIntent",
+    "OrderContextEvaluation",
     "OrderObservation",
     "OwnershipTreasuryHolding",
     "RiskDecision",
