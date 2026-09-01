@@ -30,9 +30,29 @@ class EvidenceStore:
         self.identity_factory = identity_factory or uuid4
 
     def ingest_evidence(
-        self, payload: IntelligenceIngestPayload
+        self,
+        payload: IntelligenceIngestPayload,
+        *,
+        deduplicate_event: bool = False,
     ) -> IntelligenceEvidenceLedger:
         content_hash = payload.compute_raw_content_sha256()
+        if deduplicate_event:
+            existing = self.db.scalar(
+                select(IntelligenceEvidenceLedger).where(
+                    IntelligenceEvidenceLedger.raw_content_sha256 == content_hash,
+                    IntelligenceEvidenceLedger.source_name == payload.source_name,
+                    IntelligenceEvidenceLedger.source_uri == payload.source_uri,
+                    IntelligenceEvidenceLedger.event_type == payload.event_type.value,
+                    IntelligenceEvidenceLedger.title == payload.title,
+                    IntelligenceEvidenceLedger.published_at == payload.published_at,
+                    IntelligenceEvidenceLedger.release_status
+                    == payload.release_status.value,
+                    IntelligenceEvidenceLedger.referenced_event_id
+                    == payload.referenced_event_id,
+                )
+            )
+            if existing is not None:
+                return existing
         artifact = self.db.scalar(
             select(IntelligenceRawArtifact).where(
                 IntelligenceRawArtifact.content_sha256 == content_hash
@@ -74,6 +94,8 @@ class EvidenceStore:
             confidence_score=payload.confidence_score,
             time_horizon=payload.time_horizon.value,
             raw_content_sha256=content_hash,
+            release_status=payload.release_status.value,
+            referenced_event_id=payload.referenced_event_id,
             created_at=now,
         )
         self.db.add(evidence)

@@ -83,8 +83,18 @@ class IntelligenceEvidenceLedger(Base):
             "raw_content_sha256 ~ '^[0-9a-f]{64}$'",
             name="ck_evidence_raw_content_sha256",
         ),
+        CheckConstraint(
+            "release_status IN ('SCHEDULED', 'RELEASED', 'REVISED')",
+            name="ck_evidence_release_status",
+        ),
+        CheckConstraint(
+            "referenced_event_id IS NULL OR referenced_event_id <> event_id",
+            name="ck_evidence_release_reference_semantics",
+        ),
         Index("idx_evidence_published_at", "published_at"),
         Index("idx_evidence_event_type", "event_type"),
+        Index("idx_evidence_release_status", "release_status"),
+        Index("idx_evidence_referenced_event", "referenced_event_id"),
     )
 
     event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -102,6 +112,12 @@ class IntelligenceEvidenceLedger(Base):
     confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     time_horizon: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    release_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="RELEASED", server_default="RELEASED"
+    )
+    referenced_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("intelligence_evidence_ledger.event_id")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

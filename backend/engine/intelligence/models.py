@@ -2,6 +2,7 @@ import hashlib
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -49,6 +50,12 @@ class TimeHorizon(StrEnum):
     STRUCTURAL = "STRUCTURAL"
 
 
+class ReleaseStatus(StrEnum):
+    SCHEDULED = "SCHEDULED"
+    RELEASED = "RELEASED"
+    REVISED = "REVISED"
+
+
 class EntityType(StrEnum):
     TICKER = "TICKER"
     THEME = "THEME"
@@ -87,6 +94,8 @@ class IntelligenceIngestPayload(BaseModel):
     urgency: UrgencyLevel
     confidence_score: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2)
     time_horizon: TimeHorizon
+    release_status: ReleaseStatus = ReleaseStatus.RELEASED
+    referenced_event_id: UUID | None = None
     raw_content_bytes: bytes = Field(min_length=1)
     mime_type: str = Field(default="text/plain", min_length=1, max_length=64)
     entity_links: tuple[EntityLinkPayload, ...] = ()
