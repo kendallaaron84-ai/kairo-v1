@@ -174,7 +174,11 @@ class ValidationScorecardEngine:
             scorecard_manifest_sha256=manifest.scorecard_manifest_sha256,
             executed_at=executed_at, **summary,
         )
-        self.session.add_all([run, *slices, *distributions, *bands, *vectors])
+        # There are intentionally no mutable ORM relationships on these facts.
+        # Establish the immutable parent before flushing FK-bound child ledgers.
+        self.session.add(run)
+        self.session.flush()
+        self.session.add_all([*slices, *distributions, *bands, *vectors])
         self.session.flush()
         return ScorecardResult(validation_run_id=run_id, manifest=manifest)
 
