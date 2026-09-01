@@ -203,7 +203,9 @@ def test_runtime_cannot_emit_authorized_or_executed_proposal_state(
     for state in ("AUTHORIZED", "EXECUTED"):
         proposal = raw_proposal(db_session, context, state)
         pending_event(db_session, proposal)
-        with pytest.raises(DBAPIError, match="not authorized|Unauthorized"), db_session.begin_nested():
+        with pytest.raises(
+            DBAPIError, match="without matching APPROVE|Illegal transition"
+        ), db_session.begin_nested():
             db_session.add(ReplicationProposalEvent(
                 event_id=uuid4(), proposal_id=proposal.proposal_id,
                 state_from="PENDING_AUTHORIZATION", state_to=state,
