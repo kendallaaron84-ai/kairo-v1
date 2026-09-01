@@ -49,6 +49,7 @@ SESSION_N_OPEN = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
 SESSION_N_CLOSE = datetime(2026, 9, 8, 20, 0, tzinfo=UTC)
 SESSION_N1_OPEN = datetime(2026, 9, 9, 13, 30, tzinfo=UTC)
 SESSION_N1_CLOSE = datetime(2026, 9, 9, 20, 0, tzinfo=UTC)
+EXPECTED_FLYWHEEL_SHA256 = "245f4038e6b29e800778f5470b272da9973f097bb3cb89b57ef93b8f2b0c0fb3"
 
 
 def uid(value: str) -> UUID:
@@ -422,6 +423,7 @@ def test_identical_full_flywheel_replays_produce_identical_financial_manifest(db
     second = case.runner.run_replay(case.feed)
     assert second.model_dump(mode="json") == first.model_dump(mode="json")
     assert second.compute_sha256_hash() == first.manifest_hash
+    assert first.manifest_hash == EXPECTED_FLYWHEEL_SHA256
 
 
 def test_full_flywheel_has_zero_orphan_orders_fills_consumptions_or_reservations(db_session: Session) -> None:
