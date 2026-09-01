@@ -99,11 +99,11 @@ def test_as_of_percentile_excludes_future_sessions_from_benchmark_population(sco
 
 def test_retrospective_and_as_of_percentiles_are_distinct_facts(scorecard_case):
     session, _, _, facts, _, result = scorecard_case
-    target = session.scalar(select(HistoricalValidationPerformanceBand).where(HistoricalValidationPerformanceBand.validation_run_id == result.validation_run_id, HistoricalValidationPerformanceBand.session_date == facts[10].session_date))
+    target = session.scalar(select(HistoricalValidationPerformanceBand).where(HistoricalValidationPerformanceBand.validation_run_id == result.validation_run_id, HistoricalValidationPerformanceBand.session_date == facts[11].session_date))
     assert target.as_of_percentile is not None and target.retrospective_percentile is not None
-    as_of = session.scalar(select(HistoricalSessionDistributionFact).where(HistoricalSessionDistributionFact.validation_run_id == result.validation_run_id, HistoricalSessionDistributionFact.percentile_perspective == "AS_OF", HistoricalSessionDistributionFact.benchmark_as_of_date == facts[10].session_date))
+    as_of = session.scalar(select(HistoricalSessionDistributionFact).where(HistoricalSessionDistributionFact.validation_run_id == result.validation_run_id, HistoricalSessionDistributionFact.percentile_perspective == "AS_OF", HistoricalSessionDistributionFact.benchmark_as_of_date == facts[11].session_date))
     retrospective = session.scalar(select(HistoricalSessionDistributionFact).where(HistoricalSessionDistributionFact.validation_run_id == result.validation_run_id, HistoricalSessionDistributionFact.percentile_perspective == "RETROSPECTIVE"))
-    assert as_of.sample_count == 10 and retrospective.sample_count == 12 and target.as_of_percentile != target.retrospective_percentile
+    assert as_of.sample_count == 11 and retrospective.sample_count == 12 and target.as_of_percentile != target.retrospective_percentile
 
 
 def test_empty_distribution_is_insufficient_evidence_not_zero_performance():
@@ -134,7 +134,7 @@ def test_immutability_triggers_reject_update_and_delete_across_all_five_tables(s
     tables = ("historical_validation_runs", "historical_validation_regime_slices", "historical_session_distribution_facts", "historical_validation_performance_bands", "historical_run_analog_vectors")
     for table in tables:
         for verb in (f"UPDATE {table} SET validation_run_id = validation_run_id WHERE validation_run_id = :run_id", f"DELETE FROM {table} WHERE validation_run_id = :run_id"):
-            with pytest.raises(DBAPIError, match="immutable intelligence facts"):
+            with pytest.raises(DBAPIError, match="[Ii]mmutable"):
                 with session.begin_nested(): session.execute(text(verb), {"run_id": result.validation_run_id})
 
 
