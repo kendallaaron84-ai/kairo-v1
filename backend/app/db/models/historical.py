@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,7 @@ class HistoricalMarketArtifact(Base):
         CheckConstraint("artifact_role IN ('RAW_PROVIDER_PAYLOAD','NORMALIZED_RESEARCH_STREAM')", name="market_artifact_role"),
         CheckConstraint("byte_size > 0", name="market_artifact_size_pos"),
         CheckConstraint("content_sha256 ~ '^[a-f0-9]{64}$'", name="market_artifact_sha256_format"),
+        Index("idx_market_artifacts_hash", "content_sha256"),
     )
     artifact_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     artifact_role: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -34,6 +35,7 @@ class HistoricalMarketDataset(Base):
         CheckConstraint("(price_adjustment_mode = 'RAW_UNADJUSTED' AND adjustment_policy_version IS NULL) OR (price_adjustment_mode <> 'RAW_UNADJUSTED' AND adjustment_policy_version IS NOT NULL)", name="dataset_adj_version_parity"),
         CheckConstraint("coverage_end >= coverage_start", name="dataset_coverage_valid"),
         CheckConstraint("dataset_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="dataset_manifest_sha256_format"),
+        Index("idx_datasets_provider_cov", "provider_name", "coverage_start", "coverage_end"),
     )
     dataset_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     dataset_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -64,6 +66,7 @@ class HistoricalMarketDatasetSymbol(Base):
         CheckConstraint("normalized_content_sha256 ~ '^[a-f0-9]{64}$'", name="symbol_norm_sha256_format"),
         UniqueConstraint("dataset_id", "symbol", name="uq_dataset_symbol"),
         UniqueConstraint("dataset_id", "stream_ordinal", name="uq_dataset_stream_ordinal"),
+        Index("idx_dataset_symbols_inst", "instrument_id"),
     )
     symbol_entry_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     dataset_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("historical_market_datasets.dataset_id"), nullable=False)

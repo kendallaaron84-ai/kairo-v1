@@ -87,7 +87,7 @@ def test_dataset_symbols_enforces_non_null_canonical_instrument_id(db_session, i
     raw, norm, ds = _artifact("RAW_PROVIDER_PAYLOAD", b"r"), _artifact("NORMALIZED_RESEARCH_STREAM", b"n"), _dataset()
     db_session.add_all([raw, norm, ds]); db_session.flush()
     row = _symbol(ds, instruments[0], raw, norm); row.instrument_id = None
-    with pytest.raises(IntegrityError), db_session.begin_nested(): db_session.add(row); db_session.flush()
+    with pytest.raises(DBAPIError, match="does not exist"), db_session.begin_nested(): db_session.add(row); db_session.flush()
 
 
 def test_database_rejects_symbol_entry_when_symbol_does_not_match_instrument(db_session, instruments):
