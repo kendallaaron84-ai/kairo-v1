@@ -64,7 +64,10 @@ class HistoricalMarketDatasetSymbol(Base):
         CheckConstraint("last_bar_completed_at >= first_bar_start_at", name="symbol_timestamps_valid"),
         CheckConstraint("raw_content_sha256 ~ '^[a-f0-9]{64}$'", name="symbol_raw_sha256_format"),
         CheckConstraint("normalized_content_sha256 ~ '^[a-f0-9]{64}$'", name="symbol_norm_sha256_format"),
-        UniqueConstraint("dataset_id", "symbol", name="uq_dataset_symbol"),
+        UniqueConstraint(
+            "dataset_id", "symbol", "stream_role",
+            name="uq_dataset_symbol_stream_role",
+        ),
         UniqueConstraint("dataset_id", "stream_ordinal", name="uq_dataset_stream_ordinal"),
         Index("idx_dataset_symbols_inst", "instrument_id"),
     )
