@@ -41,6 +41,9 @@ EXPECTED_TABLES = {
     "replication_proposal_events",
     "replication_proposal_reservations",
     "replication_reservation_events",
+    "replication_authorizations",
+    "replication_cash_consumptions",
+    "cell_genesis_events",
 }
 
 

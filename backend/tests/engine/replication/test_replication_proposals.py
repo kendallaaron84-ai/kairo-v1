@@ -129,6 +129,10 @@ def raw_proposal(session: Session, context: Context, suffix: str) -> CellReplica
         strategy_identifier=context.cell.strategy_id,
         strategy_version=context.cell.strategy_version,
         risk_policy_identifier="RISK-v0.1", target_config_id=context.target.config_id,
+        target_type=context.target.target_type,
+        target_instrument_id=context.target.target_instrument_id,
+        target_symbol=context.target.target_symbol,
+        target_treasury_code=context.target.target_symbol,
         proposed_autonomy_tier="APPRENTICE", is_synthetic=True,
         manifest_hash=hashlib.sha256(f"{suffix}-{uuid4()}".encode()).hexdigest(),
         created_at=NOW,
@@ -180,6 +184,10 @@ def test_database_rejects_live_replication_proposal_in_phase4(db_session: Sessio
         proposed_seed_capital_usd=Decimal("100"),
         strategy_identifier=context.cell.strategy_id, strategy_version=context.cell.strategy_version,
         risk_policy_identifier="RISK-v0.1", target_config_id=context.target.config_id,
+        target_type=context.target.target_type,
+        target_instrument_id=context.target.target_instrument_id,
+        target_symbol=context.target.target_symbol,
+        target_treasury_code=context.target.target_symbol,
         proposed_autonomy_tier="APPRENTICE", is_synthetic=False,
         manifest_hash=hashlib.sha256(str(uuid4()).encode()).hexdigest(), created_at=NOW,
     )
@@ -423,6 +431,10 @@ def test_canonical_proposal_manifest_hash_is_deterministic_and_byte_exact() -> N
         strategy_identifier="EMA-CROSS-001", strategy_version="1.0.0",
         risk_policy_identifier="RISK-v0.1",
         target_config_id=UUID("20000000-0000-4000-8000-000000000002"),
+        target_type="SINGLE_ASSET",
+        target_instrument_id=UUID("40000000-0000-4000-8000-000000000004"),
+        target_symbol="QQQ",
+        target_treasury_code="QQQ",
         proposed_autonomy_tier="APPRENTICE", is_synthetic=True, created_at=NOW,
         source_allocations=(AllocationReservationRef(
             allocation_id=UUID("30000000-0000-4000-8000-000000000003"),
@@ -437,7 +449,9 @@ def test_canonical_proposal_manifest_hash_is_deterministic_and_byte_exact() -> N
         b'"proposed_seed_capital_usd":"100.00","risk_policy_identifier":"RISK-v0.1",'
         b'"source_allocations":[{"allocation_id":"30000000-0000-4000-8000-000000000003",'
         b'"reserved_usd":"100.00"}],"strategy_identifier":"EMA-CROSS-001",'
-        b'"strategy_version":"1.0.0","target_config_id":"20000000-0000-4000-8000-000000000002"}'
+        b'"strategy_version":"1.0.0","target_config_id":"20000000-0000-4000-8000-000000000002",'
+        b'"target_instrument_id":"40000000-0000-4000-8000-000000000004",'
+        b'"target_symbol":"QQQ","target_treasury_code":"QQQ","target_type":"SINGLE_ASSET"}'
     )
     assert manifest.canonical_bytes() == expected
     assert manifest.sha256() == hashlib.sha256(expected).hexdigest()

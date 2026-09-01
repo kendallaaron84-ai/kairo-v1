@@ -22,7 +22,10 @@ from app.db.models.ledger import (
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
 from app.db.models.replication import (
+    CellGenesisEvent,
     CellReplicationProposal,
+    ReplicationAuthorization,
+    ReplicationCashConsumption,
     ReplicationProposalEvent,
     ReplicationProposalReservation,
     ReplicationReservationEvent,
@@ -40,6 +43,7 @@ __all__ = [
     "BrokerInstrumentCapability",
     "CapitalCell",
     "CellEvent",
+    "CellGenesisEvent",
     "CellReplicationProposal",
     "CellTreasuryConfig",
     "CurrentPosition",
@@ -59,6 +63,8 @@ __all__ = [
     "RiskSession",
     "RiskStateEvent",
     "ReplicationProposalEvent",
+    "ReplicationAuthorization",
+    "ReplicationCashConsumption",
     "ReplicationProposalReservation",
     "ReplicationReservationEvent",
     "SiphonEvent",
