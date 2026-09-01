@@ -398,6 +398,7 @@ def test_migration_0021_upgrade_and_downgrade_are_clean_and_data_safe(
     config.set_main_option("script_location", str(backend_root / "alembic"))
     command.downgrade(config, "0020")
     engine = create_engine(admin_url)
+    created_cell = False
     try:
         assert "intelligence_stateful_replay_runs" not in sa_inspect(engine).get_table_names()
         command.upgrade(config, "0021")
@@ -411,6 +412,7 @@ def test_migration_0021_upgrade_and_downgrade_are_clean_and_data_safe(
                     "SELECT strategy_id, version_tag FROM strategy_registry LIMIT 1"
                 )).one()
                 cell_id = uuid4()
+                created_cell = True
                 connection.execute(text("""
                     INSERT INTO capital_cells (
                         cell_id, cell_code, seed_capital, status, autonomy_tier,
@@ -456,6 +458,12 @@ def test_migration_0021_upgrade_and_downgrade_are_clean_and_data_safe(
                 "intelligence_stateful_replay_runs"
             ))
         command.downgrade(config, "0020")
+        if created_cell:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("DELETE FROM capital_cells WHERE cell_id = :cell_id"),
+                    {"cell_id": cell_id},
+                )
         command.upgrade(config, "head")
     finally:
         engine.dispose()
