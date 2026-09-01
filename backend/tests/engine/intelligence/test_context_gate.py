@@ -315,6 +315,8 @@ def test_context_gate_evaluation_does_not_modify_order_intent_or_risk_governor(
         trading_date=date(2026, 9, 1), session_open=NOW - timedelta(hours=1),
         session_close=NOW + timedelta(hours=6), created_at=NOW,
     )
+    db_session.add(risk_session)
+    db_session.flush()
     state = RiskGovernorState(
         cell_id=cell.cell_id, current_session_id=risk_session.session_id,
         operational_state="ARMED", session_realized_pnl=Decimal("0"),
@@ -322,7 +324,7 @@ def test_context_gate_evaluation_does_not_modify_order_intent_or_risk_governor(
         session_slippage_usd=Decimal("0"), session_net_pnl=Decimal("0"),
         last_state_change_at=NOW, updated_at=NOW,
     )
-    db_session.add_all([risk_session, state])
+    db_session.add(state)
     db_session.flush()
     intent_before = (intent.target_quantity, intent.order_type, intent.limit_price)
     state_before = (state.operational_state, state.session_net_pnl, state.updated_at)
