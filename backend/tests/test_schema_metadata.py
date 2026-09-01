@@ -69,6 +69,7 @@ EXPECTED_TABLES = {
     "historical_validation_performance_bands",
     "historical_run_analog_vectors",
     "historical_validation_confidence_ledgers",
+    "historical_validation_acceptance_facts",
 }
 
 

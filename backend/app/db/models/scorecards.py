@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
-from sqlalchemy import ARRAY, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import ARRAY, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
@@ -98,3 +98,32 @@ class HistoricalValidationConfidenceLedger(Base):
     hard_gate_evaluations_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     confidence_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class HistoricalValidationAcceptanceFact(Base):
+    __tablename__ = "historical_validation_acceptance_facts"
+    __table_args__ = (
+        CheckConstraint("acceptance_decision IN ('ACCEPTED_FOR_LIVE','REJECTED','CONDITIONAL_REVIEW')", name="acceptance_decision_type"),
+        CheckConstraint("(acceptance_decision = 'ACCEPTED_FOR_LIVE' AND gate_eligibility_at_review = TRUE AND hard_gates_passed_at_review = TRUE AND confidence_score_at_review >= 80.00) OR (acceptance_decision IN ('REJECTED','CONDITIONAL_REVIEW'))", name="human_acceptance_prerequisite_parity"),
+        CheckConstraint("bound_confidence_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="bound_conf_sha_format"),
+        CheckConstraint("bound_scorecard_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="bound_scorecard_sha_format"),
+        CheckConstraint("bound_multi_year_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="bound_multi_year_sha_format"),
+        CheckConstraint("decision_manifest_sha256 ~ '^[a-f0-9]{64}$'", name="decision_manifest_sha_format"),
+        UniqueConstraint("validation_run_id", name="uq_run_human_acceptance"),
+        Index("idx_acceptance_decision_lookup", "acceptance_decision", "decided_at"),
+    )
+
+    acceptance_fact_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    confidence_ledger_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("historical_validation_confidence_ledgers.confidence_ledger_id"), nullable=False)
+    validation_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("historical_validation_runs.validation_run_id"), nullable=False)
+    human_reviewer_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    acceptance_decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score_at_review: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    hard_gates_passed_at_review: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    gate_eligibility_at_review: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    bound_confidence_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    bound_scorecard_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    bound_multi_year_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
