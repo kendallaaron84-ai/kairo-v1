@@ -21,6 +21,12 @@ from app.db.models.ledger import (
     TrustEvaluation,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
+from app.db.models.replication import (
+    CellReplicationProposal,
+    ReplicationProposalEvent,
+    ReplicationProposalReservation,
+    ReplicationReservationEvent,
+)
 from app.db.models.risk import (
     RiskGovernorState,
     RiskInstrumentMark,
@@ -34,6 +40,7 @@ __all__ = [
     "BrokerInstrumentCapability",
     "CapitalCell",
     "CellEvent",
+    "CellReplicationProposal",
     "CellTreasuryConfig",
     "CurrentPosition",
     "Fill",
@@ -51,6 +58,9 @@ __all__ = [
     "RiskInstrumentMark",
     "RiskSession",
     "RiskStateEvent",
+    "ReplicationProposalEvent",
+    "ReplicationProposalReservation",
+    "ReplicationReservationEvent",
     "SiphonEvent",
     "SiphonAllocation",
     "SiphonProfitAttribution",

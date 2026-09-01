@@ -37,6 +37,10 @@ EXPECTED_TABLES = {
     "treasury_cash_consumptions",
     "treasury_regime_observations",
     "synthetic_evidence_manifests",
+    "cell_replication_proposals",
+    "replication_proposal_events",
+    "replication_proposal_reservations",
+    "replication_reservation_events",
 }
 
 
