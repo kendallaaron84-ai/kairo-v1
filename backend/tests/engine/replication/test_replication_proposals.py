@@ -206,7 +206,7 @@ def test_runtime_cannot_emit_authorized_or_executed_proposal_state(
 
 def test_proposal_lifecycle_rejects_unknown_or_invalid_transitions(db_session: Session) -> None:
     proposal = raw_proposal(db_session, seed_context(db_session), "INVALID")
-    with pytest.raises(IntegrityError), db_session.begin_nested():
+    with pytest.raises(DBAPIError, match="First proposal event"), db_session.begin_nested():
         db_session.add(ReplicationProposalEvent(
             event_id=uuid4(), proposal_id=proposal.proposal_id,
             state_from="BOGUS", state_to="PENDING_AUTHORIZATION",
