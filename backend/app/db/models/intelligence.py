@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -499,3 +500,112 @@ class IntelligenceResearchCategorySlice(Base):
     profits_forfeited_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     slice_net_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     slice_precision_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+
+
+class IntelligenceStatefulReplayRun(Base):
+    __tablename__ = "intelligence_stateful_replay_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "research_method = 'STATEFUL_REPLAY_COUNTERFACTUAL'",
+            name="ck_replay_method_stateful",
+        ),
+        CheckConstraint(
+            "sample_end_time >= sample_start_time", name="ck_stateful_replay_window"
+        ),
+        CheckConstraint(
+            "baseline_trade_count >= 0 AND counterfactual_trade_count >= 0 "
+            "AND direct_vetoed_trades_count >= 0 "
+            "AND induced_trades_taken_count >= 0 "
+            "AND induced_trades_missed_count >= 0 "
+            "AND baseline_halt_count >= 0 AND counterfactual_halt_count >= 0",
+            name="ck_stateful_replay_counts_nonnegative",
+        ),
+        CheckConstraint("baseline_cell_count >= 1", name="ck_stateful_base_cells_pos"),
+        CheckConstraint(
+            "counterfactual_cell_count >= 1", name="ck_stateful_cf_cells_pos"
+        ),
+        CheckConstraint(
+            "stateful_net_alpha_usd = counterfactual_net_pnl - baseline_net_pnl",
+            name="ck_stateful_alpha_exact",
+        ),
+        CheckConstraint(
+            "drawdown_reduction_usd = baseline_max_drawdown_usd "
+            "- counterfactual_max_drawdown_usd",
+            name="ck_stateful_drawdown_delta_exact",
+        ),
+        CheckConstraint(
+            "baseline_max_drawdown_usd >= 0 "
+            "AND counterfactual_max_drawdown_usd >= 0",
+            name="ck_stateful_drawdowns_nonnegative",
+        ),
+        CheckConstraint(
+            "stateful_replay_manifest_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_stateful_replay_manifest_sha256",
+        ),
+        Index("idx_stateful_replay_cell", "cell_id", "executed_at"),
+    )
+
+    replay_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cell_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("capital_cells.cell_id"), nullable=False
+    )
+    research_method: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="STATEFUL_REPLAY_COUNTERFACTUAL",
+        server_default="STATEFUL_REPLAY_COUNTERFACTUAL",
+    )
+    sample_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    baseline_trade_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    counterfactual_trade_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    direct_vetoed_trades_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    induced_trades_taken_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    induced_trades_missed_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_net_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    counterfactual_net_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    stateful_net_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    baseline_max_drawdown_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    counterfactual_max_drawdown_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    drawdown_reduction_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    baseline_halt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    counterfactual_halt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    siphon_delta_treasury_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    siphon_delta_replication_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    siphon_delta_safety_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    baseline_cell_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    counterfactual_cell_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    genesis_timing_delta_sessions: Mapped[int | None] = mapped_column(Integer)
+    stateful_replay_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class StatefulReplaySessionDelta(Base):
+    __tablename__ = "stateful_replay_session_deltas"
+    __table_args__ = (
+        CheckConstraint(
+            "session_alpha_usd = counterfactual_session_pnl - baseline_session_pnl",
+            name="ck_stateful_session_alpha_exact",
+        ),
+        CheckConstraint(
+            "vetoed_in_session_count >= 0 AND induced_in_session_count >= 0",
+            name="ck_stateful_session_counts_nonnegative",
+        ),
+        UniqueConstraint(
+            "replay_run_id", "session_date", name="uq_stateful_session_date"
+        ),
+        Index("idx_session_deltas_run_id", "replay_run_id"),
+    )
+
+    session_delta_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    replay_run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("intelligence_stateful_replay_runs.replay_run_id"),
+        nullable=False,
+    )
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    baseline_session_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    counterfactual_session_pnl: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    session_alpha_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    baseline_halted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    counterfactual_halted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    vetoed_in_session_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    induced_in_session_count: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -55,6 +55,8 @@ EXPECTED_TABLES = {
     "order_context_evaluations",
     "intelligence_research_runs",
     "intelligence_research_category_slices",
+    "intelligence_stateful_replay_runs",
+    "stateful_replay_session_deltas",
 }
 
 

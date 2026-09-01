@@ -30,8 +30,10 @@ from app.db.models.intelligence import (
     IntelligenceRawArtifact,
     IntelligenceResearchCategorySlice,
     IntelligenceResearchRun,
+    IntelligenceStatefulReplayRun,
     MarketContextAssessment,
     OrderContextEvaluation,
+    StatefulReplaySessionDelta,
 )
 from app.db.models.projections import CapitalCell, CurrentPosition, OwnershipTreasuryHolding
 from app.db.models.replication import (
@@ -72,12 +74,14 @@ __all__ = [
     "IntelligenceRawArtifact",
     "IntelligenceResearchCategorySlice",
     "IntelligenceResearchRun",
+    "IntelligenceStatefulReplayRun",
     "MarketContextAssessment",
     "KairoCapitalAuthorizationRecord",
     "KairoOrder",
     "MarketSnapshot",
     "OrderIntent",
     "OrderContextEvaluation",
+    "StatefulReplaySessionDelta",
     "OrderObservation",
     "OwnershipTreasuryHolding",
     "RiskDecision",
