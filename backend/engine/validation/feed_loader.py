@@ -110,14 +110,28 @@ class DataNormalizer:
         self, sections: Any, *, instrument_id: UUID, symbol: str,
     ) -> tuple[CanonicalMarketBar, ...]:
         """Own the decoded Theta-to-canonical bar boundary with no text intermediary."""
-        observations = [
-            row
-            for section in sections
-            if section.endpoint == "stock_history_ohlc"
-            for row in section.records
-        ]
+        observations = []
+        observed_timestamps: set[datetime] = set()
+        for section in sections:
+            if section.endpoint != "stock_history_ohlc":
+                continue
+            for row in section.records:
+                observed = row.get("timestamp")
+                if not isinstance(observed, datetime) or observed.tzinfo is None:
+                    raise ValueError(
+                        "Theta stock OHLC timestamp must be timezone-aware"
+                    )
+                timestamp_utc = observed.astimezone(timezone.utc)
+                if timestamp_utc in observed_timestamps:
+                    raise ValueError(
+                        f"Theta stock OHLC duplicate timestamp for {symbol}: "
+                        f"{timestamp_utc.isoformat()}"
+                    )
+                observed_timestamps.add(timestamp_utc)
+                observations.append(row)
         if not observations:
             raise ValueError("Theta decoded artifact contains no stock OHLC observations")
+        observations.sort(key=lambda row: row["timestamp"].astimezone(timezone.utc))
         return self.normalize_typed_bars(
             observations,
             instrument_id=instrument_id,
