@@ -22,6 +22,10 @@ from app.config import get_settings  # noqa: E402
 from app.db.models.configuration import Instrument  # noqa: E402
 from engine.data.corpus_qualifier import CorpusQualificationEngine, CorpusQualificationInput, PilotDecisionPoint  # noqa: E402
 from engine.data.provider_adapter import ThetaDataProviderAdapter  # noqa: E402
+from engine.data.option_enrollment import (  # noqa: E402
+    CanonicalResolutionAccounting,
+    HistoricalOptionEnrollmentGate,
+)
 from engine.data.theta_v3 import ThetaDataV3ClientTransport, ThetaDecodedArtifactReader  # noqa: E402
 from engine.strategy.ema_cross_strategy import EMACrossStrategy  # noqa: E402
 from engine.validation.feed_loader import DataNormalizer, HistoricalDatasetRegistry  # noqa: E402
@@ -99,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             all_bars: list[CanonicalMarketBar] = []
             raw_hashes = []
             streams = []
+            enrollment_accounting = []
             ordinal = 0
 
             for symbol in symbols:
@@ -128,8 +133,18 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError(f"Strategy 001 produced no pilot decision points for {symbol}")
                 response = adapter.fetch_option_neighborhoods(symbol=symbol, signal_times=signal_times)
                 decoded = reader.read_provider_artifact(response)
+                enrollment = HistoricalOptionEnrollmentGate(session).enroll_theta_sections(
+                    decoded.sections,
+                    underlying_instrument_id=instruments[symbol].instrument_id,
+                    underlying_symbol=symbol,
+                    research_replay_mode=True,
+                )
+                enrollment_accounting.append(enrollment.accounting)
                 snapshots = normalizer.normalize_theta_option_sections(
-                    decoded.sections, underlying_instrument_id=instruments[symbol].instrument_id, symbol=symbol
+                    decoded.sections,
+                    underlying_instrument_id=instruments[symbol].instrument_id,
+                    symbol=symbol,
+                    accepted_contract_keys=enrollment.accepted_contract_keys,
                 )
                 all_snapshots.extend(snapshots)
                 raw_hashes.append(decoded.content_sha256)
@@ -157,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
                 symbols=symbols, bars=tuple(all_bars), option_snapshots=tuple(all_snapshots),
                 decision_points=decisions, raw_artifact_sha256s=tuple(raw_hashes),
                 normalized_dataset_manifest_sha256=dataset.dataset_manifest_sha256,
+                resolution_accounting=CanonicalResolutionAccounting.combine(
+                    enrollment_accounting
+                ),
             ))
             qualifier.persist_manifest(registry, manifest, created_at=ingested_at)
             args.output.write_bytes(manifest.canonical_bytes())

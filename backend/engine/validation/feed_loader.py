@@ -4,7 +4,7 @@ import io
 import json
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -163,6 +163,7 @@ class DataNormalizer:
 
     def normalize_theta_option_sections(
         self, sections: Any, *, underlying_instrument_id: UUID, symbol: str,
+        accepted_contract_keys: frozenset[tuple[date, Decimal, OptionRight]] | None = None,
     ) -> tuple[CanonicalOptionChainSnapshot, ...]:
         """Join decoded Theta quote/OI/volume rows into canonical typed snapshots."""
         underlying = self._instrument(underlying_instrument_id)
@@ -187,7 +188,14 @@ class DataNormalizer:
             for quote_section in decision_sections:
                 expiry = self._as_date(quote_section.parameters.get("expiration"))
                 for row in quote_section.records:
-                    key = self._theta_contract_key(row, default_expiration=expiry)
+                    try:
+                        key = self._theta_contract_key(row, default_expiration=expiry)
+                    except (KeyError, ValueError, InvalidOperation):
+                        if accepted_contract_keys is not None:
+                            continue
+                        raise
+                    if accepted_contract_keys is not None and key not in accepted_contract_keys:
+                        continue
                     observed = row.get("timestamp")
                     if not isinstance(observed, datetime) or observed.tzinfo is None:
                         raise ValueError("Theta option quote timestamp must be timezone-aware")
@@ -272,7 +280,13 @@ class DataNormalizer:
                 continue
             default_expiry = self._as_date(section.parameters.get("expiration"))
             for row in section.records:
-                if self._theta_contract_key(row, default_expiration=default_expiry) == key and row.get(field) is not None:
+                try:
+                    observed_key = self._theta_contract_key(
+                        row, default_expiration=default_expiry
+                    )
+                except (KeyError, ValueError, InvalidOperation):
+                    continue
+                if observed_key == key and row.get(field) is not None:
                     matches.append(row)
         if not matches:
             return None
@@ -305,8 +319,14 @@ class DataNormalizer:
                 default_expiry = self._as_date(section.parameters.get("expiration"))
                 for row in section.records:
                     observed = row.get("timestamp")
+                    try:
+                        observed_key = self._theta_contract_key(
+                            row, default_expiration=default_expiry
+                        )
+                    except (KeyError, ValueError, InvalidOperation):
+                        continue
                     if (
-                        self._theta_contract_key(row, default_expiration=default_expiry) == key
+                        observed_key == key
                         and isinstance(observed, datetime)
                         and observed.tzinfo is not None
                         and observed.astimezone(timezone.utc) <= decision_at

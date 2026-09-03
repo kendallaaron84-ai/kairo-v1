@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.db.models.configuration import Instrument
+from engine.data.option_enrollment import (
+    CanonicalResolutionAccounting,
+    OptionEnrollmentReasonCode,
+    RejectedOptionContract,
+)
 from engine.validation.feed_loader import HistoricalDatasetRegistry, canonical_json_bytes
 from engine.validation.models import CanonicalMarketBar, CanonicalOptionChainSnapshot
 from engine.validation.session_calendar import SessionCalendarResolver
@@ -41,6 +46,7 @@ class CorpusQualificationInput(BaseModel):
     decision_points: tuple[PilotDecisionPoint, ...]
     raw_artifact_sha256s: tuple[str, ...]
     normalized_dataset_manifest_sha256: str
+    resolution_accounting: CanonicalResolutionAccounting | None = None
     target_dtes: tuple[int, ...] = (0, 1, 7, 14, 30)
     strikes_each_side: int = 10
 
@@ -58,6 +64,7 @@ class QualificationMetrics(BaseModel):
     causal_status: QualificationStatus
     canonical_contract_resolution_pct: Decimal
     resolution_status: QualificationStatus
+    resolution_accounting: CanonicalResolutionAccounting
     assigned_fidelity_tier: str
     fidelity_status: QualificationStatus
 
@@ -118,7 +125,11 @@ class CorpusQualificationEngine:
         causal_violations = self._causal_violations(evidence)
         complete_decisions = self._complete_decisions(evidence)
         decision_pct = self._percentage(complete_decisions, len(evidence.decision_points))
-        resolution_pct = self._canonical_resolution_percentage(evidence.option_snapshots)
+        resolution_accounting = (
+            evidence.resolution_accounting
+            or self._resolution_accounting(evidence.option_snapshots)
+        )
+        resolution_pct = resolution_accounting.resolution_percentage
         fidelity_tier = self._fidelity_tier(evidence)
 
         metrics = QualificationMetrics(
@@ -132,6 +143,7 @@ class CorpusQualificationEngine:
             causal_status=QualificationStatus.PASS if causal_violations == 0 else QualificationStatus.FAIL,
             canonical_contract_resolution_pct=resolution_pct,
             resolution_status=QualificationStatus.PASS if resolution_pct == Decimal("100.00") else QualificationStatus.FAIL,
+            resolution_accounting=resolution_accounting,
             assigned_fidelity_tier=fidelity_tier,
             fidelity_status={
                 "TIER_1_QUOTE_DEPTH": QualificationStatus.PASS,
@@ -279,15 +291,32 @@ class CorpusQualificationEngine:
     def _canonical_resolution_percentage(
         self, snapshots: tuple[CanonicalOptionChainSnapshot, ...]
     ) -> Decimal:
+        return self._resolution_accounting(snapshots).resolution_percentage
+
+    def _resolution_accounting(
+        self, snapshots: tuple[CanonicalOptionChainSnapshot, ...]
+    ) -> CanonicalResolutionAccounting:
         contracts = [contract for snapshot in snapshots for contract in snapshot.contracts]
-        if not contracts:
-            return Decimal("0.00")
         resolved = 0
+        rejected = []
         for contract in contracts:
             row = self.session.get(Instrument, contract.contract_instrument_id)
             if row is not None and row.retired_at is None and self._matches_canonical(row, contract):
                 resolved += 1
-        return self._percentage(resolved, len(contracts))
+            else:
+                rejected.append(RejectedOptionContract(
+                    discovery_key=contract.canonical_contract_symbol,
+                    reason_code=OptionEnrollmentReasonCode.CANONICAL_LOOKUP_FAILED,
+                    diagnostic="normalized contract does not match the active canonical registry",
+                ))
+        return CanonicalResolutionAccounting(
+            discovered_contracts_count=len(contracts),
+            resolved_existing_contracts_count=resolved,
+            newly_enrolled_contracts_count=0,
+            resolved_contracts_count=resolved,
+            rejected_contracts_count=len(rejected),
+            rejected_contracts=tuple(rejected),
+        )
 
     @staticmethod
     def _matches_canonical(row: Instrument, contract) -> bool:

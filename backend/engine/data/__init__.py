@@ -21,21 +21,33 @@ from engine.data.theta_v3 import (
     ThetaDecodedArtifactReader,
     ThetaDecodedArtifactSerializer,
 )
+from engine.data.option_enrollment import (
+    CanonicalResolutionAccounting,
+    HistoricalOptionEnrollmentGate,
+    OptionEnrollmentReasonCode,
+    RejectedOptionContract,
+    deterministic_option_instrument_id,
+)
 
 __all__ = [
     "CorpusQualificationEngine",
     "CorpusQualificationInput",
     "CorpusQualificationManifest",
+    "CanonicalResolutionAccounting",
     "DecodedThetaArtifact",
     "DecodedThetaRecordSection",
     "HistoricalDataProviderAdapter",
+    "HistoricalOptionEnrollmentGate",
+    "OptionEnrollmentReasonCode",
     "ProviderArtifactType",
     "ProviderTransportPayload",
     "PilotDecisionPoint",
     "QualificationStatus",
     "RawProviderArtifact",
+    "RejectedOptionContract",
     "ThetaDataProviderAdapter",
     "ThetaDataV3ClientTransport",
     "ThetaDecodedArtifactReader",
     "ThetaDecodedArtifactSerializer",
+    "deterministic_option_instrument_id",
 ]
