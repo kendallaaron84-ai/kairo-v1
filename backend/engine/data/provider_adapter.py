@@ -3,20 +3,63 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Any
 
 from engine.validation.feed_loader import canonical_json_bytes
 
 
+class ProviderArtifactType(StrEnum):
+    OPAQUE_PROVIDER_ARTIFACT = "OPAQUE_PROVIDER_ARTIFACT"
+    WIRE_PROVIDER_ARTIFACT = "WIRE_PROVIDER_ARTIFACT"
+    DECODED_PROVIDER_ARTIFACT = "DECODED_PROVIDER_ARTIFACT"
+
+
+@dataclass(frozen=True)
+class ProviderTransportPayload:
+    """Bytes returned by a transport, with an honest statement of their origin."""
+
+    content: bytes
+    mime_type: str
+    artifact_type: ProviderArtifactType
+    format_version: str
+    serializer_version: str | None = None
+    source_wire_sha256: str | None = None
+
+
 @dataclass(frozen=True)
 class RawProviderArtifact:
-    """Exact provider response bytes and deterministic request provenance."""
+    """Immutable pre-normalization provider artifact and request provenance.
+
+    The historical name is retained for compatibility with Migration 0023's
+    ``RAW_PROVIDER_PAYLOAD`` role. ``artifact_type`` distinguishes actual wire
+    bytes from an SDK-decoded provider artifact without adding a persistence
+    authority.
+    """
 
     provider_code: str
     request_kind: str
     content: bytes
     mime_type: str
     request_parameters: tuple[tuple[str, str], ...]
+    artifact_type: ProviderArtifactType = ProviderArtifactType.OPAQUE_PROVIDER_ARTIFACT
+    format_version: str = "PROVIDER_BYTES_UNCLASSIFIED-v1"
+    serializer_version: str | None = None
+    source_wire_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, bytes) or not self.content:
+            raise ValueError("provider artifact content must be non-empty bytes")
+        if self.source_wire_sha256 is not None and (
+            len(self.source_wire_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.source_wire_sha256)
+        ):
+            raise ValueError("source wire SHA-256 must be 64 lowercase hexadecimal characters")
+        if (
+            self.artifact_type is ProviderArtifactType.DECODED_PROVIDER_ARTIFACT
+            and not self.serializer_version
+        ):
+            raise ValueError("decoded provider artifacts require a serializer version")
 
     @property
     def content_sha256(self) -> str:
@@ -33,6 +76,16 @@ class RawProviderArtifact:
                 }
             )
         ).hexdigest()
+
+    def registry_raw_fields(self) -> dict[str, Any]:
+        """Fields consumed by the existing Migration 0023 dual-artifact registry.
+
+        The decoded format is self-describing inside ``content``; it occupies the
+        pre-normalization side of the frozen raw/normalized authority without
+        adding a third database role.
+        """
+
+        return {"raw_bytes": self.content, "raw_mime_type": self.mime_type}
 
 
 class HistoricalDataProviderAdapter(ABC):
@@ -58,16 +111,16 @@ class HistoricalDataProviderAdapter(ABC):
         raise NotImplementedError
 
 
-ProviderTransport = Callable[[str, dict[str, Any]], bytes]
+ProviderTransport = Callable[[str, dict[str, Any]], bytes | ProviderTransportPayload]
 
 
 class ThetaDataProviderAdapter(HistoricalDataProviderAdapter):
     """Theta acquisition request builder with injected, auditable transport.
 
     The adapter intentionally owns no network client. A caller must provide a
-    transport, which makes exact response bytes available for content-addressed
-    persistence before normalization. The strike/DTE envelope is evidence
-    acquisition metadata only and never invokes Strategy 001's resolver.
+    transport and identify whether its bytes are wire, opaque, or a deterministic
+    SDK-decoded artifact. The strike/DTE envelope is evidence acquisition metadata
+    only and never invokes Strategy 001's resolver.
     """
 
     provider_code = "THETA_DATA"
@@ -87,10 +140,12 @@ class ThetaDataProviderAdapter(HistoricalDataProviderAdapter):
             "start_session": start_session.isoformat(),
             "end_session": end_session.isoformat(),
             "interval_seconds": 60,
+            "source_timestamp_convention": "INTERVAL_BEGIN",
+            "completed_at_offset_seconds": 60,
             "session_scope": "RTH",
         }
-        content = self._transport(self.BAR_REQUEST_KIND, parameters)
-        return self._artifact(self.BAR_REQUEST_KIND, content, "text/csv", parameters)
+        payload = self._transport(self.BAR_REQUEST_KIND, parameters)
+        return self._artifact(self.BAR_REQUEST_KIND, payload, "application/octet-stream", parameters)
 
     def fetch_option_neighborhood(
         self,
@@ -130,19 +185,38 @@ class ThetaDataProviderAdapter(HistoricalDataProviderAdapter):
             "strikes_each_side": strikes_each_side,
             "rights": "CALL,PUT",
             "selection_authority": "EVIDENCE_FETCH_ONLY",
+            "open_interest_as_of": "PREVIOUS_SESSION_REPORTED_ON_REQUEST_SESSION",
+            "missing_liquidity": "NULL_NEVER_ZERO",
+            "volume_cutoff": "DECISION_TIMESTAMP_NO_EOD_LOOKAHEAD",
+            "instrument_identity": "UNDERLYING_EXPIRATION_STRIKE_RIGHT",
         }
-        content = self._transport(self.OPTION_REQUEST_KIND, parameters)
-        return self._artifact(self.OPTION_REQUEST_KIND, content, "application/json", parameters)
+        payload = self._transport(self.OPTION_REQUEST_KIND, parameters)
+        return self._artifact(self.OPTION_REQUEST_KIND, payload, "application/octet-stream", parameters)
 
     def _artifact(
-        self, request_kind: str, content: bytes, mime_type: str, parameters: dict[str, Any]
+        self,
+        request_kind: str,
+        payload: bytes | ProviderTransportPayload,
+        default_mime_type: str,
+        parameters: dict[str, Any],
     ) -> RawProviderArtifact:
-        if not isinstance(content, bytes) or not content:
-            raise ValueError("provider transport must return non-empty exact response bytes")
+        if isinstance(payload, bytes):
+            payload = ProviderTransportPayload(
+                content=payload,
+                mime_type=default_mime_type,
+                artifact_type=ProviderArtifactType.OPAQUE_PROVIDER_ARTIFACT,
+                format_version="THETA_PROVIDER_BYTES_UNCLASSIFIED-v1",
+            )
+        if not isinstance(payload, ProviderTransportPayload) or not payload.content:
+            raise ValueError("provider transport must return a non-empty typed provider payload")
         return RawProviderArtifact(
             provider_code=self.provider_code,
             request_kind=request_kind,
-            content=content,
-            mime_type=mime_type,
+            content=payload.content,
+            mime_type=payload.mime_type,
             request_parameters=tuple(sorted((key, str(value)) for key, value in parameters.items())),
+            artifact_type=payload.artifact_type,
+            format_version=payload.format_version,
+            serializer_version=payload.serializer_version,
+            source_wire_sha256=payload.source_wire_sha256,
         )
