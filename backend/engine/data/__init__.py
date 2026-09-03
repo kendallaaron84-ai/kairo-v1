@@ -14,12 +14,20 @@ from engine.data.provider_adapter import (
     RawProviderArtifact,
     ThetaDataProviderAdapter,
 )
-from engine.data.theta_v3 import ThetaDataV3ClientTransport, ThetaDecodedArtifactSerializer
+from engine.data.theta_v3 import (
+    DecodedThetaArtifact,
+    DecodedThetaRecordSection,
+    ThetaDataV3ClientTransport,
+    ThetaDecodedArtifactReader,
+    ThetaDecodedArtifactSerializer,
+)
 
 __all__ = [
     "CorpusQualificationEngine",
     "CorpusQualificationInput",
     "CorpusQualificationManifest",
+    "DecodedThetaArtifact",
+    "DecodedThetaRecordSection",
     "HistoricalDataProviderAdapter",
     "ProviderArtifactType",
     "ProviderTransportPayload",
@@ -28,5 +36,6 @@ __all__ = [
     "RawProviderArtifact",
     "ThetaDataProviderAdapter",
     "ThetaDataV3ClientTransport",
+    "ThetaDecodedArtifactReader",
     "ThetaDecodedArtifactSerializer",
 ]

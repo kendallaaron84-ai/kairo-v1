@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import math
 import numbers
 import struct
@@ -42,6 +43,24 @@ class DecodedThetaSection:
     endpoint: str
     parameters: Mapping[str, Any]
     dataframe: Any
+
+
+@dataclass(frozen=True)
+class DecodedThetaRecordSection:
+    endpoint: str
+    parameters: Mapping[str, Any]
+    fields: tuple[str, ...]
+    records: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DecodedThetaArtifact:
+    content_sha256: str
+    format_version: str
+    serializer_version: str
+    acquisition_request: Mapping[str, Any]
+    source_wire_sha256s: tuple[str, ...]
+    sections: tuple[DecodedThetaRecordSection, ...]
 
 
 class ThetaDecodedArtifactSerializer:
@@ -180,6 +199,187 @@ class ThetaDecodedArtifactSerializer:
             and not isinstance(value, numbers.Integral)
             and math.isnan(float(value))
         )
+
+
+class ThetaDecodedArtifactReader:
+    """Strict inverse of the accepted decoded-provider serialization.
+
+    Reading requires the authority-recorded SHA-256. Every frame must be
+    canonical and every ordering/version invariant must match exactly.
+    """
+
+    def read_provider_artifact(self, artifact: Any) -> DecodedThetaArtifact:
+        if artifact.artifact_type is not ProviderArtifactType.DECODED_PROVIDER_ARTIFACT:
+            raise ValueError("Theta artifact is not a decoded provider artifact")
+        if artifact.format_version != ThetaDecodedArtifactSerializer.FORMAT_VERSION:
+            raise ValueError("Theta decoded artifact format version drift")
+        if artifact.serializer_version != ThetaDecodedArtifactSerializer.SERIALIZER_VERSION:
+            raise ValueError("Theta decoded artifact serializer version drift")
+        return self.read(
+            artifact.content,
+            expected_content_sha256=artifact.content_sha256,
+        )
+
+    def read(self, content: bytes, *, expected_content_sha256: str) -> DecodedThetaArtifact:
+        if len(expected_content_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_content_sha256
+        ):
+            raise ValueError("expected content SHA-256 must be lowercase hexadecimal")
+        actual_digest = hashlib.sha256(content).hexdigest()
+        if actual_digest != expected_content_sha256:
+            raise ValueError("Theta decoded artifact SHA-256 mismatch")
+        serializer = ThetaDecodedArtifactSerializer
+        if not content.startswith(serializer.MAGIC):
+            raise ValueError("Theta decoded artifact framing mismatch")
+        frames = self._frames(content[len(serializer.MAGIC) :])
+        if not frames:
+            raise ValueError("Theta decoded artifact header is absent")
+        decoded_frames = []
+        for frame in frames:
+            try:
+                decoded = json.loads(frame)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("Theta decoded artifact contains an invalid JSON frame") from error
+            if canonical_json_bytes(decoded) != frame:
+                raise ValueError("Theta decoded artifact frame is not canonical")
+            decoded_frames.append(decoded)
+        header, *section_frames = decoded_frames
+        self._header(header, len(section_frames))
+        if [canonical_json_bytes(item) for item in section_frames] != sorted(
+            canonical_json_bytes(item) for item in section_frames
+        ):
+            raise ValueError("Theta decoded artifact sections are not canonically ordered")
+        sections = tuple(self._section(item) for item in section_frames)
+        return DecodedThetaArtifact(
+            content_sha256=actual_digest,
+            format_version=header["format_version"],
+            serializer_version=header["serializer_version"],
+            acquisition_request=self._mapping(header["acquisition_request"]),
+            source_wire_sha256s=tuple(header["source_wire_sha256s"]),
+            sections=sections,
+        )
+
+    @staticmethod
+    def _frames(payload: bytes) -> list[bytes]:
+        frames = []
+        offset = 0
+        while offset < len(payload):
+            if len(payload) - offset < 8:
+                raise ValueError("Theta decoded artifact has a truncated frame length")
+            length = struct.unpack(">Q", payload[offset : offset + 8])[0]
+            offset += 8
+            if length == 0 or len(payload) - offset < length:
+                raise ValueError("Theta decoded artifact has a truncated or empty frame")
+            frames.append(payload[offset : offset + length])
+            offset += length
+        return frames
+
+    @staticmethod
+    def _header(header: Any, section_count: int) -> None:
+        if not isinstance(header, dict):
+            raise ValueError("Theta decoded artifact header must be an object")
+        expected = {
+            "artifact_type": ProviderArtifactType.DECODED_PROVIDER_ARTIFACT,
+            "format_version": ThetaDecodedArtifactSerializer.FORMAT_VERSION,
+            "serializer_version": ThetaDecodedArtifactSerializer.SERIALIZER_VERSION,
+            "field_order": "UNICODE_CODEPOINT_ASCENDING",
+            "row_order": "LEXICOGRAPHIC_CANONICAL_TYPED_ROW_BYTES",
+            "timestamp_encoding": "UTC_RFC3339_MICROSECONDS_Z",
+            "integer_encoding": "BASE10_STRING",
+            "float_encoding": "PYTHON_FLOAT_HEX_IEEE754_BINARY64",
+            "decimal_encoding": "SIGN_DIGITS_EXPONENT",
+            "framing": "MAGIC_THEN_UINT64_BE_LENGTH_PREFIXED_CANONICAL_JSON_FRAMES",
+        }
+        if set(header) != set(expected) | {
+            "null_encoding", "acquisition_request", "source_wire_sha256s", "section_count"
+        }:
+            raise ValueError("Theta decoded artifact header schema mismatch")
+        if any(header.get(key) != value for key, value in expected.items()):
+            raise ValueError("Theta decoded artifact schema or serializer version drift")
+        if header.get("null_encoding") != {"type": "null"}:
+            raise ValueError("Theta decoded artifact NULL encoding drift")
+        if header.get("section_count") != section_count:
+            raise ValueError("Theta decoded artifact section count mismatch")
+        hashes = header.get("source_wire_sha256s")
+        if (
+            not isinstance(hashes, list)
+            or hashes != sorted(set(hashes))
+            or any(
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for digest in hashes
+            )
+        ):
+            raise ValueError("Theta decoded artifact source-wire lineage is invalid")
+        if not isinstance(header.get("acquisition_request"), dict):
+            raise ValueError("Theta decoded artifact acquisition request is invalid")
+
+    def _section(self, value: Any) -> DecodedThetaRecordSection:
+        if not isinstance(value, dict) or set(value) != {
+            "endpoint",
+            "parameters",
+            "fields",
+            "rows",
+        }:
+            raise ValueError("Theta decoded artifact section schema mismatch")
+        if not isinstance(value["endpoint"], str):
+            raise ValueError("Theta decoded artifact endpoint is invalid")
+        fields = value["fields"]
+        rows = value["rows"]
+        if not isinstance(fields, list) or any(not isinstance(field, str) for field in fields) or fields != sorted(set(fields)):
+            raise ValueError("Theta decoded artifact fields are not canonical")
+        if not isinstance(rows, list) or any(
+            not isinstance(row, list) or len(row) != len(fields) for row in rows
+        ):
+            raise ValueError("Theta decoded artifact row schema mismatch")
+        if [canonical_json_bytes(row) for row in rows] != sorted(
+            canonical_json_bytes(row) for row in rows
+        ):
+            raise ValueError("Theta decoded artifact rows are not canonically ordered")
+        records = tuple(
+            {field: self._value(cell) for field, cell in zip(fields, row, strict=True)}
+            for row in rows
+        )
+        return DecodedThetaRecordSection(
+            endpoint=str(value["endpoint"]),
+            parameters=self._mapping(value["parameters"]),
+            fields=tuple(fields),
+            records=records,
+        )
+
+    def _mapping(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or list(value) != sorted(value):
+            raise ValueError("Theta decoded artifact mapping order is not canonical")
+        return {str(key): self._value(item) for key, item in value.items()}
+
+    def _value(self, value: Any) -> Any:
+        if not isinstance(value, dict) or "type" not in value:
+            raise ValueError("Theta decoded artifact value lacks a type tag")
+        value_type = value["type"]
+        if value_type == "null" and value == {"type": "null"}:
+            return None
+        if value_type == "boolean" and isinstance(value.get("value"), bool):
+            return value["value"]
+        if value_type == "integer":
+            return int(value["value"])
+        if value_type == "float64":
+            return float.fromhex(value["value"])
+        if value_type == "decimal":
+            digits = tuple(int(digit) for digit in value["digits"])
+            return Decimal((int(value["sign"]), digits, int(value["exponent"])))
+        if value_type == "timestamp":
+            parsed = datetime.strptime(value["value"], "%Y-%m-%dT%H:%M:%S.%fZ")
+            return parsed.replace(tzinfo=timezone.utc)
+        if value_type == "date":
+            return date.fromisoformat(value["value"])
+        if value_type == "wall_clock_time":
+            return time.fromisoformat(value["value"])
+        if value_type == "bytes":
+            return base64.b64decode(value["value"], validate=True)
+        if value_type == "text" and isinstance(value.get("value"), str):
+            return value["value"]
+        raise ValueError(f"Theta decoded artifact value type is invalid: {value_type}")
 
 
 class ThetaDataV3ClientTransport:

@@ -2,7 +2,8 @@ import csv
 import hashlib
 import io
 import json
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -56,23 +57,41 @@ class DataNormalizer:
         source_timezone: str, timestamp_convention: SourceTimestampConvention,
         bar_interval_seconds: int,
     ) -> tuple[CanonicalMarketBar, ...]:
+        zone = ZoneInfo(source_timezone)
+        observations = []
+        for row in csv.DictReader(io.StringIO(raw_csv.decode("utf-8"))):
+            observed = datetime.fromisoformat(row["timestamp"])
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=zone)
+            observations.append({**row, "timestamp": observed})
+        return self.normalize_typed_bars(
+            observations,
+            instrument_id=instrument_id,
+            symbol=symbol,
+            timestamp_convention=timestamp_convention,
+            bar_interval_seconds=bar_interval_seconds,
+        )
+
+    def normalize_typed_bars(
+        self, observations: Any, *, instrument_id: UUID, symbol: str,
+        timestamp_convention: SourceTimestampConvention,
+        bar_interval_seconds: int,
+    ) -> tuple[CanonicalMarketBar, ...]:
+        """Normalize typed provider observations without a text serialization shim."""
         instrument = self._instrument(instrument_id)
         if instrument.symbol != symbol:
             raise ValueError("bar symbol does not match canonical instrument")
         if bar_interval_seconds <= 0:
             raise ValueError("bar interval must be positive")
-        zone = ZoneInfo(source_timezone)
         result: list[CanonicalMarketBar] = []
-        for row in csv.DictReader(io.StringIO(raw_csv.decode("utf-8"))):
-            observed = datetime.fromisoformat(row["timestamp"])
-            if observed.tzinfo is None:
-                observed = observed.replace(tzinfo=zone)
+        for row in observations:
+            observed = row["timestamp"]
+            if not isinstance(observed, datetime) or observed.tzinfo is None:
+                raise ValueError("typed bar timestamp must be timezone-aware")
             if timestamp_convention is SourceTimestampConvention.INTERVAL_BEGIN:
-                start = observed
-                completed = observed + timedelta(seconds=bar_interval_seconds)
+                start, completed = observed, observed + timedelta(seconds=bar_interval_seconds)
             elif timestamp_convention is SourceTimestampConvention.INTERVAL_END:
-                completed = observed
-                start = observed - timedelta(seconds=bar_interval_seconds)
+                start, completed = observed - timedelta(seconds=bar_interval_seconds), observed
             else:
                 raise ValueError("bar streams cannot use TICK_ARRIVAL timestamp convention")
             start, completed = start.astimezone(timezone.utc), completed.astimezone(timezone.utc)
@@ -80,12 +99,224 @@ class DataNormalizer:
                 continue
             result.append(CanonicalMarketBar(
                 instrument_id=instrument_id, symbol=symbol, interval_start_at=start,
-                completed_at=completed, open=Decimal(row["open"]), high=Decimal(row["high"]),
-                low=Decimal(row["low"]), close=Decimal(row["close"]),
-                volume=Decimal(row["volume"]) if row.get("volume") not in (None, "") else None,
+                completed_at=completed, open=Decimal(str(row["open"])), high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])), close=Decimal(str(row["close"])),
+                volume=Decimal(str(row["volume"])) if row.get("volume") not in (None, "") else None,
             ))
         self._chronological([item.completed_at for item in result])
         return tuple(result)
+
+    def normalize_theta_bars(
+        self, sections: Any, *, instrument_id: UUID, symbol: str,
+    ) -> tuple[CanonicalMarketBar, ...]:
+        """Own the decoded Theta-to-canonical bar boundary with no text intermediary."""
+        observations = [
+            row
+            for section in sections
+            if section.endpoint == "stock_history_ohlc"
+            for row in section.records
+        ]
+        if not observations:
+            raise ValueError("Theta decoded artifact contains no stock OHLC observations")
+        return self.normalize_typed_bars(
+            observations,
+            instrument_id=instrument_id,
+            symbol=symbol,
+            timestamp_convention=SourceTimestampConvention.INTERVAL_BEGIN,
+            bar_interval_seconds=60,
+        )
+
+    def normalize_typed_option_chains(
+        self, snapshots: Any,
+    ) -> tuple[CanonicalOptionChainSnapshot, ...]:
+        """Validate already-typed canonical snapshots at the normalization boundary."""
+        result = tuple(
+            item if isinstance(item, CanonicalOptionChainSnapshot)
+            else CanonicalOptionChainSnapshot.model_validate(item)
+            for item in snapshots
+        )
+        for snapshot in result:
+            underlying = self._instrument(snapshot.underlying_instrument_id)
+            if underlying.asset_class == "OPTION" or underlying.symbol != snapshot.underlying_symbol:
+                raise ValueError("option snapshot underlying identity is not canonical")
+            for quote in snapshot.contracts:
+                contract = self._instrument(quote.contract_instrument_id)
+                if contract.asset_class != "OPTION" or contract.underlying_symbol != underlying.symbol:
+                    raise ValueError("option contract and snapshot underlying differ")
+                candidate = OptionContractCandidate(
+                    instrument_id=contract.instrument_id,
+                    underlying_symbol=quote.underlying_symbol,
+                    expiration_date=quote.expiration_date,
+                    strike_price=quote.strike_price,
+                    option_right=quote.option_right,
+                    contract_symbol=quote.canonical_contract_symbol,
+                    contract_multiplier=quote.contract_multiplier,
+                    listing_type=quote.listing_type,
+                    bid=quote.bid_price,
+                    ask=quote.ask_price,
+                    volume=quote.volume,
+                    open_interest=quote.open_interest,
+                )
+                validate_candidate_identity(candidate, _canonical(contract))
+        self._chronological([item.canonical_completed_at for item in result])
+        return result
+
+    def normalize_theta_option_sections(
+        self, sections: Any, *, underlying_instrument_id: UUID, symbol: str,
+    ) -> tuple[CanonicalOptionChainSnapshot, ...]:
+        """Join decoded Theta quote/OI/volume rows into canonical typed snapshots."""
+        underlying = self._instrument(underlying_instrument_id)
+        if underlying.asset_class == "OPTION" or underlying.symbol != symbol:
+            raise ValueError("Theta option underlying identity is not canonical")
+        sections = tuple(sections)
+        quote_sections = tuple(item for item in sections if item.endpoint == "option_history_quote")
+        if not quote_sections:
+            raise ValueError("Theta decoded artifact contains no option quote sections")
+        eastern = ZoneInfo("America/New_York")
+        grouped_quotes: dict[tuple[date, datetime], list[Any]] = {}
+        for quote_section in quote_sections:
+            request_date = self._as_date(quote_section.parameters.get("date"))
+            end_time = quote_section.parameters.get("end_time")
+            if not isinstance(end_time, time):
+                raise ValueError("Theta option quote section lacks a typed end_time")
+            decision_at = datetime.combine(request_date, end_time, eastern).astimezone(timezone.utc)
+            grouped_quotes.setdefault((request_date, decision_at), []).append(quote_section)
+        snapshots = []
+        for (request_date, decision_at), decision_sections in sorted(grouped_quotes.items()):
+            latest_quotes: dict[tuple[date, Decimal, OptionRight], Mapping[str, Any]] = {}
+            for quote_section in decision_sections:
+                expiry = self._as_date(quote_section.parameters.get("expiration"))
+                for row in quote_section.records:
+                    key = self._theta_contract_key(row, default_expiration=expiry)
+                    observed = row.get("timestamp")
+                    if not isinstance(observed, datetime) or observed.tzinfo is None:
+                        raise ValueError("Theta option quote timestamp must be timezone-aware")
+                    if observed.astimezone(timezone.utc) > decision_at:
+                        raise ValueError("Theta option quote is later than the decision timestamp")
+                    prior = latest_quotes.get(key)
+                    if prior is None or observed > prior["timestamp"]:
+                        latest_quotes[key] = row
+            contracts = []
+            for key, quote in sorted(latest_quotes.items(), key=lambda item: (item[0][0], item[0][1], item[0][2].value)):
+                expiration, strike, right = key
+                contract = self.session.scalar(select(Instrument).where(
+                    Instrument.asset_class == "OPTION",
+                    Instrument.underlying_symbol == symbol,
+                    Instrument.expiration_date == expiration,
+                    Instrument.strike_price == strike,
+                    Instrument.option_right == right.value,
+                    Instrument.retired_at.is_(None),
+                ))
+                if contract is None:
+                    raise ValueError("Theta option contract does not resolve to canonical identity")
+                open_interest = self._theta_latest_value(
+                    sections, "option_history_open_interest", key, request_date, "open_interest"
+                )
+                volume = self._theta_volume_through(sections, key, request_date, decision_at)
+                contracts.append(CanonicalOptionContractQuote(
+                    contract_instrument_id=contract.instrument_id,
+                    underlying_instrument_id=underlying_instrument_id,
+                    underlying_symbol=symbol,
+                    canonical_contract_symbol=contract.contract_symbol,
+                    expiration_date=expiration,
+                    strike_price=strike,
+                    option_right=right,
+                    contract_multiplier=contract.contract_multiplier,
+                    listing_type=contract.listing_type,
+                    bid_price=Decimal(str(quote["bid"])),
+                    ask_price=Decimal(str(quote["ask"])),
+                    bid_size=Decimal(str(quote["bid_size"])),
+                    ask_size=Decimal(str(quote["ask_size"])),
+                    volume=volume,
+                    open_interest=open_interest,
+                    liquidity_verifiable=volume is not None and open_interest is not None,
+                ))
+            snapshots.append(CanonicalOptionChainSnapshot(
+                underlying_instrument_id=underlying_instrument_id,
+                underlying_symbol=symbol,
+                canonical_completed_at=decision_at,
+                contracts=tuple(contracts),
+            ))
+        return self.normalize_typed_option_chains(sorted(
+            snapshots, key=lambda item: item.canonical_completed_at
+        ))
+
+    @staticmethod
+    def _as_date(value: Any) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value)[:10])
+
+    def _theta_contract_key(
+        self, row: Mapping[str, Any], *, default_expiration: date,
+    ) -> tuple[date, Decimal, OptionRight]:
+        raw_right = str(row["right"]).upper()
+        right = OptionRight.CALL if raw_right in {"CALL", "C"} else OptionRight.PUT if raw_right in {"PUT", "P"} else None
+        if right is None:
+            raise ValueError("Theta option right is invalid")
+        return (
+            self._as_date(row.get("expiration", default_expiration)),
+            Decimal(str(row["strike"])),
+            right,
+        )
+
+    def _theta_latest_value(
+        self, sections: tuple[Any, ...], endpoint: str,
+        key: tuple[date, Decimal, OptionRight], request_date: date, field: str,
+    ) -> int | None:
+        matches = []
+        for section in sections:
+            if section.endpoint != endpoint or self._as_date(section.parameters.get("date")) != request_date:
+                continue
+            default_expiry = self._as_date(section.parameters.get("expiration"))
+            for row in section.records:
+                if self._theta_contract_key(row, default_expiration=default_expiry) == key and row.get(field) is not None:
+                    matches.append(row)
+        if not matches:
+            return None
+        latest = max(matches, key=lambda row: row.get("timestamp") or datetime.min.replace(tzinfo=timezone.utc))
+        return int(latest[field])
+
+    def _theta_volume_through(
+        self, sections: tuple[Any, ...], key: tuple[date, Decimal, OptionRight],
+        request_date: date, decision_at: datetime,
+    ) -> int | None:
+        local_decision = decision_at.astimezone(ZoneInfo("America/New_York"))
+        endpoint_windows = (
+            ("option_history_trade", local_decision.time().replace(tzinfo=None), "size"),
+            (
+                "option_history_ohlc",
+                (local_decision - timedelta(minutes=1)).time().replace(tzinfo=None),
+                "volume",
+            ),
+        )
+        for endpoint, expected_end, volume_field in endpoint_windows:
+            total = 0
+            found = False
+            for section in sections:
+                if (
+                    section.endpoint != endpoint
+                    or self._as_date(section.parameters.get("date")) != request_date
+                    or section.parameters.get("end_time") != expected_end
+                ):
+                    continue
+                default_expiry = self._as_date(section.parameters.get("expiration"))
+                for row in section.records:
+                    observed = row.get("timestamp")
+                    if (
+                        self._theta_contract_key(row, default_expiration=default_expiry) == key
+                        and isinstance(observed, datetime)
+                        and observed.tzinfo is not None
+                        and observed.astimezone(timezone.utc) <= decision_at
+                        and row.get(volume_field) is not None
+                    ):
+                        total += int(row[volume_field])
+                        found = True
+            if found:
+                return total
+        return None
 
     def normalize_option_chains(self, raw_json: bytes) -> tuple[CanonicalOptionChainSnapshot, ...]:
         payload = json.loads(raw_json)
@@ -130,8 +361,7 @@ class DataNormalizer:
                 underlying_instrument_id=underlying_id, underlying_symbol=underlying.symbol,
                 canonical_completed_at=completed.astimezone(timezone.utc), contracts=tuple(contracts),
             ))
-        self._chronological([item.canonical_completed_at for item in result])
-        return tuple(result)
+        return self.normalize_typed_option_chains(result)
 
     @staticmethod
     def normalized_bytes(items: tuple[Any, ...]) -> bytes:
