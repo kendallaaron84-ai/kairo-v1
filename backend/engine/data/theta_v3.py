@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from thetadata.errors import NoDataFoundError
+
 from engine.validation.feed_loader import canonical_json_bytes
 
 from .provider_adapter import ProviderArtifactType, ProviderTransportPayload
@@ -44,6 +46,29 @@ class DecodedThetaSection:
     parameters: Mapping[str, Any]
     dataframe: Any
 
+    @property
+    def missing_evidence(self) -> ProviderMissingEvidence | None:
+        return self.dataframe if isinstance(self.dataframe, ProviderMissingEvidence) else None
+
+
+@dataclass(frozen=True)
+class ProviderMissingEvidence:
+    """Typed, non-fabricated record of an authoritative provider no-data response."""
+
+    provider: str
+    endpoint: str
+    symbol: str
+    session: date
+    reason_code: str
+    records_count: int
+    context: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.provider != "THETA_DATA":
+            raise ValueError("missing evidence provider must be THETA_DATA")
+        if self.reason_code != "PROVIDER_NO_DATA" or self.records_count != 0:
+            raise ValueError("missing evidence must represent PROVIDER_NO_DATA with zero records")
+
 
 @dataclass(frozen=True)
 class DecodedThetaRecordSection:
@@ -51,6 +76,7 @@ class DecodedThetaRecordSection:
     parameters: Mapping[str, Any]
     fields: tuple[str, ...]
     records: tuple[Mapping[str, Any], ...]
+    missing_evidence: ProviderMissingEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +102,7 @@ class ThetaDecodedArtifactSerializer:
     SERIALIZER_VERSION = "KAIRO-THETA-DECODED-SERIALIZER-v1"
     MIME_TYPE = "application/vnd.kairo.theta-protobuf-decoded"
     MAGIC = b"KAIRO-THETA-DECODED\x00\x01"
+    MISSING_EVIDENCE_MARKER = "__kairo_provider_missing_evidence__"
 
     def serialize(
         self,
@@ -131,6 +158,16 @@ class ThetaDecodedArtifactSerializer:
 
     @staticmethod
     def _records(dataframe: Any) -> list[dict[str, Any]]:
+        if isinstance(dataframe, ProviderMissingEvidence):
+            return [{
+                ThetaDecodedArtifactSerializer.MISSING_EVIDENCE_MARKER: True,
+                "provider": dataframe.provider,
+                "endpoint": dataframe.endpoint,
+                "symbol": dataframe.symbol,
+                "session": dataframe.session,
+                "reason_code": dataframe.reason_code,
+                "records_count": dataframe.records_count,
+            }]
         if hasattr(dataframe, "to_dicts"):
             rows = dataframe.to_dicts()
         elif hasattr(dataframe, "to_dict"):
@@ -337,15 +374,47 @@ class ThetaDecodedArtifactReader:
             canonical_json_bytes(row) for row in rows
         ):
             raise ValueError("Theta decoded artifact rows are not canonically ordered")
-        records = tuple(
+        decoded_records = tuple(
             {field: self._value(cell) for field, cell in zip(fields, row, strict=True)}
             for row in rows
+        )
+        missing_evidence = self._missing_evidence(
+            value["endpoint"], self._mapping(value["parameters"]), decoded_records
         )
         return DecodedThetaRecordSection(
             endpoint=str(value["endpoint"]),
             parameters=self._mapping(value["parameters"]),
             fields=tuple(fields),
-            records=records,
+            records=() if missing_evidence is not None else decoded_records,
+            missing_evidence=missing_evidence,
+        )
+
+    @staticmethod
+    def _missing_evidence(
+        endpoint: str,
+        parameters: Mapping[str, Any],
+        records: tuple[Mapping[str, Any], ...],
+    ) -> ProviderMissingEvidence | None:
+        marker = ThetaDecodedArtifactSerializer.MISSING_EVIDENCE_MARKER
+        marked = [record for record in records if record.get(marker) is True]
+        if not marked:
+            return None
+        if len(records) != 1 or len(marked) != 1 or set(marked[0]) != {
+            marker, "provider", "endpoint", "symbol", "session", "reason_code",
+            "records_count",
+        }:
+            raise ValueError("Theta decoded artifact missing-evidence record is invalid")
+        record = marked[0]
+        if record["endpoint"] != endpoint:
+            raise ValueError("Theta decoded artifact missing-evidence endpoint mismatch")
+        return ProviderMissingEvidence(
+            provider=str(record["provider"]),
+            endpoint=str(record["endpoint"]),
+            symbol=str(record["symbol"]),
+            session=record["session"],
+            reason_code=str(record["reason_code"]),
+            records_count=int(record["records_count"]),
+            context=parameters,
         )
 
     def _mapping(self, value: Any) -> dict[str, Any]:
@@ -455,8 +524,7 @@ class ThetaDataV3ClientTransport:
                 "end_time": self.RTH_END,
                 "venue": "utp_cta",
             }
-            frame = self._client.stock_history_ohlc(**kwargs)
-            sections.append(DecodedThetaSection("stock_history_ohlc", kwargs, frame))
+            sections.append(self._call("stock_history_ohlc", kwargs))
         return sections
 
     @staticmethod
@@ -492,8 +560,14 @@ class ThetaDataV3ClientTransport:
                 "symbol": symbol,
                 "max_dte": max(target_dtes),
             }
-            contracts = self._client.option_list_contracts(**list_kwargs)
-            sections.append(DecodedThetaSection("option_list_contracts", list_kwargs, contracts))
+            contract_section = self._call(
+                "option_list_contracts", list_kwargs,
+                context={**list_kwargs, "decision_at": signal},
+            )
+            sections.append(contract_section)
+            if contract_section.missing_evidence is not None:
+                continue
+            contracts = contract_section.dataframe
             expirations = self._target_expirations(contracts, session, target_dtes)
             for expiration in expirations:
                 common = {
@@ -510,20 +584,8 @@ class ThetaDataV3ClientTransport:
                     "start_time": self.RTH_START,
                     "end_time": local_signal.time().replace(tzinfo=None),
                 }
-                sections.append(
-                    DecodedThetaSection(
-                        "option_history_quote",
-                        quote_kwargs,
-                        self._client.option_history_quote(**quote_kwargs),
-                    )
-                )
-                sections.append(
-                    DecodedThetaSection(
-                        "option_history_open_interest",
-                        common,
-                        self._client.option_history_open_interest(**common),
-                    )
-                )
+                sections.append(self._call("option_history_quote", quote_kwargs))
+                sections.append(self._call("option_history_open_interest", common))
                 history_kwargs = {
                     **common,
                     "start_time": self.RTH_START,
@@ -537,21 +599,38 @@ class ThetaDataV3ClientTransport:
                     "end_time": last_complete_open,
                     "interval": "1m",
                 }
-                sections.append(
-                    DecodedThetaSection(
-                        "option_history_ohlc",
-                        ohlc_kwargs,
-                        self._client.option_history_ohlc(**ohlc_kwargs),
-                    )
-                )
-                sections.append(
-                    DecodedThetaSection(
-                        "option_history_trade",
-                        history_kwargs,
-                        self._client.option_history_trade(**history_kwargs),
-                    )
-                )
+                sections.append(self._call("option_history_ohlc", ohlc_kwargs))
+                sections.append(self._call("option_history_trade", history_kwargs))
         return sections
+
+    def _call(
+        self,
+        endpoint: str,
+        kwargs: Mapping[str, Any],
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> DecodedThetaSection:
+        """Invoke one SDK endpoint once and preserve typed no-data provenance."""
+        try:
+            frame = getattr(self._client, endpoint)(**dict(kwargs))
+            return DecodedThetaSection(endpoint, kwargs, frame)
+        except NoDataFoundError:
+            evidence_context = dict(context or kwargs)
+            session_value = kwargs.get("date", kwargs.get("start_date"))
+            if isinstance(session_value, datetime):
+                session_value = session_value.date()
+            if not isinstance(session_value, date):
+                raise ValueError("Theta no-data response lacks a typed session date")
+            evidence = ProviderMissingEvidence(
+                provider="THETA_DATA",
+                endpoint=endpoint,
+                symbol=str(kwargs["symbol"]),
+                session=session_value,
+                reason_code="PROVIDER_NO_DATA",
+                records_count=0,
+                context=evidence_context,
+            )
+            return DecodedThetaSection(endpoint, evidence_context, evidence)
 
     @staticmethod
     def _target_expirations(

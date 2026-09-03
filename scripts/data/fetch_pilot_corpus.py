@@ -78,6 +78,139 @@ def derive_strategy_001_decisions(
     return tuple(decisions)
 
 
+def acquire_underlying_evidence(adapter, symbols, start_session, end_session):
+    """Phase A: perform provider I/O without creating a database session."""
+    return {
+        symbol: adapter.fetch_equity_minute_bars(
+            symbol=symbol, start_session=start_session, end_session=end_session
+        )
+        for symbol in symbols
+    }
+
+
+def normalize_underlying_evidence(engine, calendar, symbols, responses):
+    """Phase B: resolve identities and normalize during one short read session."""
+    reader = ThetaDecodedArtifactReader()
+    all_bars: list[CanonicalMarketBar] = []
+    streams = []
+    instrument_ids = {}
+    with Session(engine, expire_on_commit=False) as session:
+        instruments = {symbol: _instrument(session, symbol) for symbol in symbols}
+        normalizer = DataNormalizer(session, calendar)
+        for ordinal, symbol in enumerate(symbols):
+            response = responses[symbol]
+            decoded = reader.read_provider_artifact(response)
+            instrument_id = instruments[symbol].instrument_id
+            normalized = normalizer.normalize_theta_bars(
+                decoded.sections, instrument_id=instrument_id, symbol=symbol
+            )
+            instrument_ids[symbol] = instrument_id
+            all_bars.extend(normalized)
+            streams.append({
+                "instrument_id": instrument_id, "symbol": symbol,
+                "stream_role": StreamRole.UNDERLYING_SIGNAL_BARS,
+                "stream_ordinal": ordinal,
+                **response.registry_raw_fields(),
+                "normalized_bytes": normalizer.normalized_bytes(normalized),
+                "bar_count": len(normalized),
+                "first_bar_start_at": normalized[0].interval_start_at,
+                "last_bar_completed_at": normalized[-1].completed_at,
+            })
+    return instrument_ids, tuple(all_bars), tuple(streams)
+
+
+def acquire_option_evidence(adapter, symbols, decisions):
+    """Phase D: perform signal-driven provider I/O without a database session."""
+    responses = {}
+    for symbol in symbols:
+        signal_times = tuple(item.signal_at for item in decisions if item.symbol == symbol)
+        if not signal_times:
+            raise ValueError(f"Strategy 001 produced no pilot decision points for {symbol}")
+        responses[symbol] = adapter.fetch_option_neighborhoods(
+            symbol=symbol, signal_times=signal_times
+        )
+    return responses
+
+
+def persist_pilot_atomically(
+    engine, calendar, args, symbols, instrument_ids, all_bars, decisions,
+    underlying_responses, underlying_streams, option_responses,
+):
+    """Phase E: one commit-or-rollback authority for all canonical persistence."""
+    reader = ThetaDecodedArtifactReader()
+    with Session(engine, expire_on_commit=False) as session, session.begin():
+        instruments = {symbol: _instrument(session, symbol) for symbol in symbols}
+        if any(
+            instruments[symbol].instrument_id != instrument_ids[symbol]
+            for symbol in symbols
+        ):
+            raise ValueError("canonical underlying identity changed between pipeline phases")
+        normalizer = DataNormalizer(session, calendar)
+        registry = HistoricalDatasetRegistry(session, args.storage_root)
+        streams = list(underlying_streams)
+        raw_hashes = [
+            reader.read_provider_artifact(underlying_responses[symbol]).content_sha256
+            for symbol in symbols
+        ]
+        enrollment_accounting = []
+        all_snapshots = []
+        ordinal = len(streams)
+        for symbol in symbols:
+            response = option_responses[symbol]
+            decoded = reader.read_provider_artifact(response)
+            enrollment = HistoricalOptionEnrollmentGate(session).enroll_theta_sections(
+                decoded.sections,
+                underlying_instrument_id=instruments[symbol].instrument_id,
+                underlying_symbol=symbol,
+                research_replay_mode=True,
+            )
+            enrollment_accounting.append(enrollment.accounting)
+            snapshots = normalizer.normalize_theta_option_sections(
+                decoded.sections,
+                underlying_instrument_id=instruments[symbol].instrument_id,
+                symbol=symbol,
+                accepted_contract_keys=enrollment.accepted_contract_keys,
+            )
+            all_snapshots.extend(snapshots)
+            raw_hashes.append(decoded.content_sha256)
+            streams.append({
+                "instrument_id": instruments[symbol].instrument_id, "symbol": symbol,
+                "stream_role": StreamRole.OPTION_CHAIN_QUOTES,
+                "stream_ordinal": ordinal,
+                **response.registry_raw_fields(),
+                "normalized_bytes": normalizer.normalized_bytes(snapshots),
+                "bar_count": len(snapshots),
+                "first_bar_start_at": snapshots[0].canonical_completed_at,
+                "last_bar_completed_at": snapshots[-1].canonical_completed_at,
+            })
+            ordinal += 1
+
+        ingested_at = datetime.now(timezone.utc)
+        dataset = registry.register_dataset(
+            dataset_name=f"THETA-PILOT-{args.start.isoformat()}-{args.end.isoformat()}",
+            provider_name="THETA_DATA", bar_interval_seconds=60,
+            source_timezone="America/New_York",
+            source_timestamp_convention="INTERVAL_BEGIN",
+            liquidity_fidelity_tier="TIER_1_QUOTE_DEPTH",
+            price_adjustment_mode="RAW_UNADJUSTED", adjustment_policy_version=None,
+            normalization_policy_version="NORM-PILOT-CORPUS-v1",
+            ingested_at=ingested_at, streams=tuple(streams), calendar=calendar,
+        )
+        qualifier = CorpusQualificationEngine(session, calendar)
+        manifest = qualifier.qualify(CorpusQualificationInput(
+            provider_code="THETA_DATA", start_session=args.start,
+            end_session=args.end, symbols=symbols, bars=all_bars,
+            option_snapshots=tuple(all_snapshots), decision_points=decisions,
+            raw_artifact_sha256s=tuple(raw_hashes),
+            normalized_dataset_manifest_sha256=dataset.dataset_manifest_sha256,
+            resolution_accounting=CanonicalResolutionAccounting.combine(
+                enrollment_accounting
+            ),
+        ))
+        qualifier.persist_manifest(registry, manifest, created_at=ingested_at)
+    return manifest
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     calendar = SessionCalendarResolver()
@@ -90,94 +223,25 @@ def main(argv: list[str] | None = None) -> int:
 
     engine = create_engine(get_settings().runtime_database_url)
     try:
-        with Session(engine, expire_on_commit=False) as session, session.begin():
-            instruments = {symbol: _instrument(session, symbol) for symbol in symbols}
-            transport = ThetaDataV3ClientTransport.from_local_environment(
-                allow_paid_historical_retrieval=args.authorize_paid_theta_history,
-                dotenv_path=BACKEND_ROOT / ".env",
-            )
-            adapter = ThetaDataProviderAdapter(transport)
-            reader = ThetaDecodedArtifactReader()
-            normalizer = DataNormalizer(session, calendar)
-            registry = HistoricalDatasetRegistry(session, args.storage_root)
-            all_bars: list[CanonicalMarketBar] = []
-            raw_hashes = []
-            streams = []
-            enrollment_accounting = []
-            ordinal = 0
-
-            for symbol in symbols:
-                response = adapter.fetch_equity_minute_bars(
-                    symbol=symbol, start_session=args.start, end_session=args.end
-                )
-                decoded = reader.read_provider_artifact(response)
-                normalized = normalizer.normalize_theta_bars(
-                    decoded.sections, instrument_id=instruments[symbol].instrument_id, symbol=symbol
-                )
-                all_bars.extend(normalized)
-                raw_hashes.append(decoded.content_sha256)
-                streams.append({
-                    "instrument_id": instruments[symbol].instrument_id, "symbol": symbol,
-                    "stream_role": StreamRole.UNDERLYING_SIGNAL_BARS, "stream_ordinal": ordinal,
-                    **response.registry_raw_fields(), "normalized_bytes": normalizer.normalized_bytes(normalized),
-                    "bar_count": len(normalized), "first_bar_start_at": normalized[0].interval_start_at,
-                    "last_bar_completed_at": normalized[-1].completed_at,
-                })
-                ordinal += 1
-
-            decisions = derive_strategy_001_decisions(tuple(all_bars))
-            all_snapshots = []
-            for symbol in symbols:
-                signal_times = tuple(item.signal_at for item in decisions if item.symbol == symbol)
-                if not signal_times:
-                    raise ValueError(f"Strategy 001 produced no pilot decision points for {symbol}")
-                response = adapter.fetch_option_neighborhoods(symbol=symbol, signal_times=signal_times)
-                decoded = reader.read_provider_artifact(response)
-                enrollment = HistoricalOptionEnrollmentGate(session).enroll_theta_sections(
-                    decoded.sections,
-                    underlying_instrument_id=instruments[symbol].instrument_id,
-                    underlying_symbol=symbol,
-                    research_replay_mode=True,
-                )
-                enrollment_accounting.append(enrollment.accounting)
-                snapshots = normalizer.normalize_theta_option_sections(
-                    decoded.sections,
-                    underlying_instrument_id=instruments[symbol].instrument_id,
-                    symbol=symbol,
-                    accepted_contract_keys=enrollment.accepted_contract_keys,
-                )
-                all_snapshots.extend(snapshots)
-                raw_hashes.append(decoded.content_sha256)
-                streams.append({
-                    "instrument_id": instruments[symbol].instrument_id, "symbol": symbol,
-                    "stream_role": StreamRole.OPTION_CHAIN_QUOTES, "stream_ordinal": ordinal,
-                    **response.registry_raw_fields(), "normalized_bytes": normalizer.normalized_bytes(snapshots),
-                    "bar_count": len(snapshots), "first_bar_start_at": snapshots[0].canonical_completed_at,
-                    "last_bar_completed_at": snapshots[-1].canonical_completed_at,
-                })
-                ordinal += 1
-
-            ingested_at = datetime.now(timezone.utc)
-            dataset = registry.register_dataset(
-                dataset_name=f"THETA-PILOT-{args.start.isoformat()}-{args.end.isoformat()}",
-                provider_name="THETA_DATA", bar_interval_seconds=60, source_timezone="America/New_York",
-                source_timestamp_convention="INTERVAL_BEGIN", liquidity_fidelity_tier="TIER_1_QUOTE_DEPTH",
-                price_adjustment_mode="RAW_UNADJUSTED", adjustment_policy_version=None,
-                normalization_policy_version="NORM-PILOT-CORPUS-v1", ingested_at=ingested_at,
-                streams=tuple(streams), calendar=calendar,
-            )
-            qualifier = CorpusQualificationEngine(session, calendar)
-            manifest = qualifier.qualify(CorpusQualificationInput(
-                provider_code="THETA_DATA", start_session=args.start, end_session=args.end,
-                symbols=symbols, bars=tuple(all_bars), option_snapshots=tuple(all_snapshots),
-                decision_points=decisions, raw_artifact_sha256s=tuple(raw_hashes),
-                normalized_dataset_manifest_sha256=dataset.dataset_manifest_sha256,
-                resolution_accounting=CanonicalResolutionAccounting.combine(
-                    enrollment_accounting
-                ),
-            ))
-            qualifier.persist_manifest(registry, manifest, created_at=ingested_at)
-            args.output.write_bytes(manifest.canonical_bytes())
+        transport = ThetaDataV3ClientTransport.from_local_environment(
+            allow_paid_historical_retrieval=args.authorize_paid_theta_history,
+            dotenv_path=BACKEND_ROOT / ".env",
+        )
+        adapter = ThetaDataProviderAdapter(transport)
+        underlying_responses = acquire_underlying_evidence(
+            adapter, symbols, args.start, args.end
+        )
+        instrument_ids, all_bars, underlying_streams = normalize_underlying_evidence(
+            engine, calendar, symbols, underlying_responses
+        )
+        decisions = derive_strategy_001_decisions(all_bars)
+        option_responses = acquire_option_evidence(adapter, symbols, decisions)
+        manifest = persist_pilot_atomically(
+            engine, calendar, args, symbols, instrument_ids, all_bars, decisions,
+            underlying_responses, underlying_streams, option_responses,
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(manifest.canonical_bytes())
     finally:
         engine.dispose()
     return 0

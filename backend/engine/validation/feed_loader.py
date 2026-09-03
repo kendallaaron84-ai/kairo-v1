@@ -185,10 +185,25 @@ class DataNormalizer:
             raise ValueError("Theta option underlying identity is not canonical")
         sections = tuple(sections)
         quote_sections = tuple(item for item in sections if item.endpoint == "option_history_quote")
-        if not quote_sections:
+        missing_contract_lists = tuple(
+            item for item in sections
+            if item.endpoint == "option_list_contracts"
+            and getattr(item, "missing_evidence", None) is not None
+        )
+        if not quote_sections and not missing_contract_lists:
             raise ValueError("Theta decoded artifact contains no option quote sections")
         eastern = ZoneInfo("America/New_York")
         grouped_quotes: dict[tuple[date, datetime], list[Any]] = {}
+        for contract_section in missing_contract_lists:
+            decision_at = contract_section.parameters.get("decision_at")
+            if not isinstance(decision_at, datetime) or decision_at.tzinfo is None:
+                raise ValueError(
+                    "Theta contract-list no-data evidence lacks a typed decision_at"
+                )
+            request_date = self._as_date(contract_section.parameters.get("date"))
+            grouped_quotes.setdefault(
+                (request_date, decision_at.astimezone(timezone.utc)), []
+            )
         for quote_section in quote_sections:
             request_date = self._as_date(quote_section.parameters.get("date"))
             end_time = quote_section.parameters.get("end_time")
