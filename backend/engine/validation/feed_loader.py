@@ -344,7 +344,6 @@ class DataNormalizer:
                     bid=Decimal(str(raw["bid_price"])), ask=Decimal(str(raw["ask_price"])),
                     volume=raw.get("volume"), open_interest=raw.get("open_interest"),
                 )
-                validate_candidate_identity(candidate, _canonical(contract))
                 if contract.underlying_symbol != underlying.symbol:
                     raise ValueError("option contract and snapshot underlying differ")
                 contracts.append(CanonicalOptionContractQuote(
