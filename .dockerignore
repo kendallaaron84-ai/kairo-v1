@@ -6,4 +6,10 @@ node_modules
 backend/.pytest_cache
 backend/**/__pycache__
 *.pyc
-.env
+.env*
+**/.env*
+backend/.venv
+.venv
+/data
+coverage
+*.log
