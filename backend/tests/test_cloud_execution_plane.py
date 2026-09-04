@@ -278,6 +278,7 @@ def test_cloud_run_deployment_uses_discrete_pilot_argument_array_and_gcs_mount()
     assert "KAIRO_CLOUD_PILOT_AUTHORIZED=1" in deployment
     assert "type=cloud-storage,bucket=kairo-market-artifacts-507516" in deployment
     assert "mount-path=/mnt/kairo-market-artifacts" in deployment
+    assert deployment.count("--max-retries=0") == 1
     assert "--execute-now" not in deployment
 
 
@@ -353,6 +354,16 @@ def test_cloud_pilot_requires_dual_authorization_and_stable_storage_mount():
             {"KAIRO_CLOUD_PILOT_AUTHORIZED": "1"},
             calendar,
         )
+    for start, end in (
+        (date(2024, 1, 3), date(2024, 3, 28)),
+        (date(2024, 1, 2), date(2024, 3, 27)),
+    ):
+        with pytest.raises(ValueError, match="Attempt #4 requires exactly"):
+            pilot.validate_scope(
+                argparse.Namespace(**{**vars(args), "start": start, "end": end}),
+                {"KAIRO_CLOUD_PILOT_AUTHORIZED": "1"},
+                calendar,
+            )
 
 
 def test_partial_resume_materializes_sealed_bytes_without_provider_fetch():

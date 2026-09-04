@@ -8,6 +8,7 @@ PILOT_ARGS="^|^scripts/data/cloud_pilot_qualification.py|--provider|theta|--star
 gcloud run jobs deploy kairo-historical-ingestion \
   --project=kairo-research-507516 \
   --region=us-south1 \
+  --max-retries=0 \
   --image="${IMAGE_URI}" \
   --set-cloudsql-instances=kairo-research-507516:us-south1:kairo-research-db \
   --set-secrets=THETADATA_API_KEY=thetadata-api-key:latest,KAIRO_RUNTIME_DATABASE_URL=kairo-runtime-db-url:latest \

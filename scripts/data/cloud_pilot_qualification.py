@@ -49,6 +49,8 @@ DEFAULT_BUCKET = "kairo-market-artifacts-507516"
 DEFAULT_MANIFEST_OBJECT = "manifests/theta_q1_2024_manifest.json"
 DEFAULT_STORAGE_ROOT = Path("/mnt/kairo-market-artifacts/historical-market")
 ACQUISITION_POLICY_VERSION = "KAIRO-STAGE1-Q1-2024-v1"
+AUTHORIZED_START = date(2024, 1, 2)
+AUTHORIZED_END = date(2024, 3, 28)
 TARGET_DTES = (0, 1, 7, 14, 30)
 STRIKES_EACH_SIDE = 10
 
@@ -75,6 +77,8 @@ def validate_scope(
     symbols = tuple(value.strip().upper() for value in args.symbols.split(",") if value.strip())
     if symbols != ("TQQQ", "SQQQ"):
         raise ValueError("the frozen Stage 1 Theta pilot requires symbols TQQQ,SQQQ")
+    if args.start != AUTHORIZED_START or args.end != AUTHORIZED_END:
+        raise ValueError("Attempt #4 requires exactly 2024-01-02 through 2024-03-28")
     session_count = len(calendar.sessions(args.start, args.end))
     if session_count < 30 or session_count > 61:
         raise ValueError("Stage 1 pilot window must contain 30 through 61 canonical sessions")
