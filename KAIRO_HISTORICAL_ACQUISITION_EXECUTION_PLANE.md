@@ -46,7 +46,7 @@ You are permitted to create ONLY the following files (and any strictly necessary
 - Therefore, the secret value itself must be an authoritative, complete `postgresql+psycopg` SQLAlchemy URL configured to connect through the Cloud SQL Unix socket mounted at:
   `/cloudsql/kairo-research-507516:us-south1:kairo-research-db`
   *(e.g., `postgresql+psycopg://<user>:<password>@/kairo_research?host=/cloudsql/kairo-research-507516:us-south1:kairo-research-db`)*.
-- Antigravity must not construct, synthesize, print, log, or commit credentials.
+- Cody must not construct, synthesize, print, log, or commit credentials.
 - Cloud Run must attach the instance with:
   `--set-cloudsql-instances=kairo-research-507516:us-south1:kairo-research-db`
 - In the same project, secret bindings follow standard Cloud Run syntax:
@@ -64,3 +64,93 @@ You are permitted to create ONLY the following files (and any strictly necessary
       f"{sorted(target_dtes)}|{strikes_each_side}|"
       f"{serializer_version}|{acquisition_policy_version}".encode("utf-8")
   ).hexdigest()
+
+  Checkpoint Path:
+gs://<bucket>/checkpoints/{symbol}/{session}/{unit_key}.json
+
+Checkpoint Metadata Schema:
+
+JSON
+{
+  "unit_key": "...",
+  "content_sha256": "...",
+  "format_version": "THETA_PROTOBUF_DECODED-v1",
+  "serializer_version": "...",
+  "provider": "THETA_DATA",
+  "endpoint": "option_history_quote",
+  "symbol": "TQQQ",
+  "session": "2024-01-10",
+  "signal_at": "2024-01-10T14:32:00Z",
+  "sealed_at": "2026-09-04T12:00:00Z",
+  "record_count": 42
+}
+Use if-generation-match=0 (create-if-absent) on checkpoint writes to enforce atomic, race-free sealing.
+
+C. Resume & Idempotency Pipeline
+Check GCS for checkpoints/{symbol}/{session}/{unit_key}.json.
+
+If present, skip outbound network queries entirely.
+
+If absent, execute provider query, verify SHA-256 integrity, persist .bin to GCS, write checkpoint JSON, emit structured log event, and proceed.
+
+D. Structured Telemetry (Cloud Logging)
+All runtime progress must emit single-line, valid JSON to stdout:
+
+JSON
+{
+  "severity": "INFO",
+  "event": "ACQUISITION_UNIT_SEALED",
+  "symbol": "TQQQ",
+  "session": "2024-01-10",
+  "unit_key": "...",
+  "content_sha256": "...",
+  "records": 42
+}
+E. Smoke-Runner Safety Boundaries (scripts/data/cloud_smoke_test.py)
+The smoke runner is a standalone, isolated diagnostic harness for verifying container wiring.
+
+Hardcoded Constraint: Hard-capped at exactly 1 symbol and 1 trading session.
+
+Gating Flag: Requires an explicit --authorize-cloud-smoke-test CLI flag and dedicated environment variable check (KAIRO_CLOUD_SMOKE_AUTHORIZED=1).
+
+Isolation: Must NOT import, alter, or loosen scripts/data/fetch_pilot_corpus.py or its frozen 30–61 session validation logic.
+
+Scope: Validates Secret Manager ingestion, Cloud SQL reachability via Unix socket, GCS checkpoint creation, and a single bounded underlying bar query.
+
+4. CONFORMANCE TEST REQUIREMENTS
+Implement in backend/tests/test_cloud_execution_plane.py (using mocks; no live cloud resources or paid Theta requests during tests):
+
+test_dockerfile_python_version_and_paths: Assert base image is python:3.12-slim and build context accommodates backend/ and scripts/.
+
+test_unit_key_sensitivity: Prove changing any parameter alters the resulting unit_key.
+
+test_gcs_checkpoint_atomic_seal: Validate payload byte preservation and checkpoint payload structure.
+
+test_resume_skips_provider_fetch: Prove sealed checkpoints bypass provider fetches with zero outbound network calls.
+
+test_smoke_runner_rejects_exceeded_scope: Prove cloud_smoke_test.py fails closed if requested for >1 day or >1 symbol.
+
+test_structured_log_emission_valid_json: Validate log format conformance to Google Cloud Logging schemas.
+
+5. ACCEPTANCE CRITERIA
+Local Verification:
+
+git diff --name-only backend/engine/ backend/app/domain/ backend/alembic/ scripts/data/fetch_pilot_corpus.py outputs nothing.
+
+Dockerfile builds cleanly from root context (docker build -t kairo-engine:test .).
+
+All new execution-plane tests pass locally.
+
+CI Verification Authority:
+
+PostgreSQL 16 GitHub Actions workflow passes with >= 549 + new tests.
+
+Migration head confirmed at 0027.
+
+Execution Stop:
+
+Do NOT execute live multi-year pulls.
+
+Do NOT run Attempt #4.
+
+STOP immediately after passing CI.
