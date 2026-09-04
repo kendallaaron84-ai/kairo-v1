@@ -259,3 +259,18 @@ def test_cloud_run_deployment_uses_discrete_smoke_argument_array():
     assert '--args="${SMOKE_ARGS}"' in deployment
     assert "KAIRO_CLOUD_SMOKE_AUTHORIZED=1" in deployment
     assert "--execute-now" not in deployment
+
+
+def test_gcloud_source_archive_preserves_smoke_runner():
+    ignore_lines = {
+        line.strip()
+        for line in (ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "#!include:.gitignore" not in ignore_lines
+    assert "data" not in ignore_lines
+    assert "data/" not in ignore_lines
+    assert "/data" in ignore_lines
+    assert "scripts" not in ignore_lines
+    assert "scripts/data" not in ignore_lines
+    assert "scripts/data/cloud_smoke_test.py" not in ignore_lines
