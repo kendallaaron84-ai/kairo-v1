@@ -166,13 +166,46 @@ class GCSCheckpointStore:
         if metadata.canonical_bytes() != content:
             raise ValueError("checkpoint metadata is not canonical")
         self._validate_metadata(unit, metadata)
+        self.read_artifact(metadata)
+        return metadata
+
+    def read_artifact(self, metadata: CheckpointMetadata) -> bytes:
+        """Materialize and verify the byte-exact artifact named by metadata."""
+        _validate_digest(metadata.content_sha256)
+        if metadata.format_version != THETA_DECODED_FORMAT_VERSION:
+            raise ValueError("checkpoint provider artifact format version drift")
+        if not metadata.serializer_version:
+            raise ValueError("checkpoint provider artifact serializer version is absent")
         artifact_blob = self._bucket.blob(self.artifact_path(metadata.content_sha256))
         if not artifact_blob.exists():
             raise ValueError("checkpoint references an absent provider artifact")
         artifact = artifact_blob.download_as_bytes()
         if hashlib.sha256(artifact).hexdigest() != metadata.content_sha256:
             raise ValueError("checkpoint provider artifact SHA-256 mismatch")
-        return metadata
+        return artifact
+
+    def seal_manifest(self, object_name: str, content: bytes) -> bool:
+        """Create a canonical qualification manifest, or verify an identical seal."""
+        if (
+            not object_name.startswith("manifests/")
+            or object_name.endswith("/")
+            or ".." in object_name.split("/")
+            or "\\" in object_name
+        ):
+            raise ValueError("manifest object must be a safe path below manifests/")
+        if not isinstance(content, bytes) or not content:
+            raise ValueError("manifest content must be non-empty bytes")
+        blob = self._bucket.blob(object_name)
+        if blob.exists():
+            if blob.download_as_bytes() != content:
+                raise ValueError("existing qualification manifest bytes conflict")
+            return False
+        blob.upload_from_string(
+            content,
+            content_type="application/vnd.kairo.corpus-qualification+json",
+            if_generation_match=0,
+        )
+        return True
 
     def seal(
         self,

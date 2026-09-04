@@ -106,6 +106,15 @@ def load_smoke_module():
     return module
 
 
+def load_pilot_module():
+    path = ROOT / "scripts" / "data" / "cloud_pilot_qualification.py"
+    spec = importlib.util.spec_from_file_location("kairo_cloud_pilot_qualification", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_dockerfile_python_version_and_paths():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.startswith("FROM python:3.12-slim\n")
@@ -238,26 +247,37 @@ def test_structured_log_emission_valid_json(capsys):
     }
 
 
-def test_cloud_run_deployment_uses_discrete_smoke_argument_array():
+def test_cloud_run_deployment_uses_discrete_pilot_argument_array_and_gcs_mount():
     deployment = (ROOT / "deploy" / "deploy_cloud_run_job.sh").read_text(
         encoding="utf-8"
     )
-    match = re.search(r'^SMOKE_ARGS="([^"]+)"$', deployment, flags=re.MULTILINE)
+    match = re.search(r'^PILOT_ARGS="\^\|\^([^"]+)"$', deployment, flags=re.MULTILINE)
     assert match is not None
-    assert ["python", *match.group(1).split(",")] == [
+    assert ["python", *match.group(1).split("|")] == [
         "python",
-        "scripts/data/cloud_smoke_test.py",
-        "--symbols",
-        "TQQQ",
+        "scripts/data/cloud_pilot_qualification.py",
+        "--provider",
+        "theta",
         "--start",
         "2024-01-02",
         "--end",
-        "2024-01-02",
-        "--authorize-cloud-smoke-test",
+        "2024-03-28",
+        "--symbols",
+        "TQQQ,SQQQ",
+        "--qualify",
+        "--bucket",
+        "kairo-market-artifacts-507516",
+        "--manifest-object",
+        "manifests/theta_q1_2024_manifest.json",
+        "--storage-root",
+        "/mnt/kairo-market-artifacts/historical-market",
+        "--authorize-paid-theta-history",
     ]
     assert '--command=python' in deployment
-    assert '--args="${SMOKE_ARGS}"' in deployment
-    assert "KAIRO_CLOUD_SMOKE_AUTHORIZED=1" in deployment
+    assert '--args="${PILOT_ARGS}"' in deployment
+    assert "KAIRO_CLOUD_PILOT_AUTHORIZED=1" in deployment
+    assert "type=cloud-storage,bucket=kairo-market-artifacts-507516" in deployment
+    assert "mount-path=/mnt/kairo-market-artifacts" in deployment
     assert "--execute-now" not in deployment
 
 
@@ -274,3 +294,188 @@ def test_gcloud_source_archive_preserves_smoke_runner():
     assert "scripts" not in ignore_lines
     assert "scripts/data" not in ignore_lines
     assert "scripts/data/cloud_smoke_test.py" not in ignore_lines
+    assert "scripts/data/cloud_pilot_qualification.py" not in ignore_lines
+
+
+def test_verified_artifact_materialization_detects_corruption():
+    checkpoint_store, client = store()
+    payload = Artifact(b"verified-provider-bytes")
+    metadata = checkpoint_store.seal(
+        unit(),
+        payload,
+        record_count=3,
+        sealed_at=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    assert checkpoint_store.read_artifact(metadata) == payload.content
+    artifact_path = checkpoint_store.artifact_path(metadata.content_sha256)
+    client.value.blobs[artifact_path].data = b"corrupted"
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        checkpoint_store.read_artifact(metadata)
+
+
+def test_underlying_and_option_units_use_frozen_resume_granularity():
+    pilot = load_pilot_module()
+    underlying = pilot.underlying_unit("TQQQ", date(2024, 1, 10))
+    assert underlying.endpoint == "stock_history_ohlc"
+    assert underlying.signal_at is None
+    assert underlying.target_dtes == ()
+    assert underlying.strikes_each_side == 0
+
+    signal_at = datetime(2024, 1, 10, 15, 32, tzinfo=timezone.utc)
+    option = pilot.option_unit("TQQQ", signal_at)
+    assert option.endpoint == "OPTION_STRIKE_NEIGHBORHOOD"
+    assert option.signal_at == signal_at
+    assert option.target_dtes == (0, 1, 7, 14, 30)
+    assert option.strikes_each_side == 10
+
+
+def test_cloud_pilot_requires_dual_authorization_and_stable_storage_mount():
+    pilot = load_pilot_module()
+    calendar = Mock()
+    calendar.sessions.return_value = tuple((date(2024, 1, day), None, None) for day in range(1, 31))
+    args = argparse.Namespace(
+        symbols="TQQQ,SQQQ",
+        start=date(2024, 1, 2),
+        end=date(2024, 3, 28),
+        authorize_paid_theta_history=True,
+        storage_root=Path("/mnt/kairo-market-artifacts/historical-market"),
+        manifest_object="manifests/theta_q1_2024_manifest.json",
+    )
+    assert pilot.validate_scope(args, {"KAIRO_CLOUD_PILOT_AUTHORIZED": "1"}, calendar) == (
+        "TQQQ",
+        "SQQQ",
+    )
+    with pytest.raises(PermissionError, match="KAIRO_CLOUD_PILOT_AUTHORIZED"):
+        pilot.validate_scope(args, {}, calendar)
+    with pytest.raises(ValueError, match="storage root"):
+        pilot.validate_scope(
+            argparse.Namespace(**{**vars(args), "storage_root": Path("/tmp")}),
+            {"KAIRO_CLOUD_PILOT_AUTHORIZED": "1"},
+            calendar,
+        )
+
+
+def test_partial_resume_materializes_sealed_bytes_without_provider_fetch():
+    pilot = load_pilot_module()
+    checkpoint_store, _ = store()
+    serializer = ThetaDecodedArtifactSerializer()
+    content = serializer.serialize(
+        [], acquisition_request={"symbol": "TQQQ", "session": date(2024, 1, 10)}
+    )
+    acquisition = pilot.underlying_unit("TQQQ", date(2024, 1, 10))
+    checkpoint_store.seal(
+        acquisition,
+        Artifact(content),
+        record_count=0,
+        sealed_at=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    provider_fetch = Mock(side_effect=AssertionError("sealed unit must not refetch"))
+    materialized = pilot.acquire_unit(checkpoint_store, acquisition, provider_fetch)
+    assert materialized.content == content
+    provider_fetch.assert_not_called()
+
+
+def test_qualification_manifest_is_sealed_only_after_persistence_succeeds():
+    pilot = load_pilot_module()
+    events = []
+    manifest = Mock()
+    manifest.canonical_bytes.return_value = b'{"qualification":"PASS"}'
+    checkpoint_store = Mock()
+
+    def persist():
+        events.append("DATABASE_COMMITTED")
+        return manifest
+
+    checkpoint_store.seal_manifest.side_effect = lambda *_: events.append("GCS_SEALED")
+    assert pilot.persist_then_seal_manifest(
+        persist,
+        checkpoint_store,
+        "manifests/theta_q1_2024_manifest.json",
+    ) is manifest
+    assert events == ["DATABASE_COMMITTED", "GCS_SEALED"]
+
+    checkpoint_store.reset_mock()
+    with pytest.raises(RuntimeError, match="rollback"):
+        pilot.persist_then_seal_manifest(
+            Mock(side_effect=RuntimeError("database rollback")),
+            checkpoint_store,
+            "manifests/theta_q1_2024_manifest.json",
+        )
+    checkpoint_store.seal_manifest.assert_not_called()
+
+
+def test_manifest_seal_is_create_only_idempotent_and_conflict_closed():
+    checkpoint_store, client = store()
+    object_name = "manifests/theta_q1_2024_manifest.json"
+    content = b'{"qualification":"PASS"}'
+    assert checkpoint_store.seal_manifest(object_name, content) is True
+    blob = client.value.blobs[object_name]
+    assert blob.uploads == [
+        {
+            "content_type": "application/vnd.kairo.corpus-qualification+json",
+            "if_generation_match": 0,
+        }
+    ]
+    assert checkpoint_store.seal_manifest(object_name, content) is False
+    with pytest.raises(ValueError, match="conflict"):
+        checkpoint_store.seal_manifest(object_name, b'{"qualification":"FAIL"}')
+
+
+def test_reconstructed_aggregate_is_invariant_to_component_arrival_order():
+    pilot = load_pilot_module()
+    serializer = ThetaDecodedArtifactSerializer()
+
+    def component(session_date: date):
+        content = serializer.serialize(
+            [
+                pilot.DecodedThetaSection(
+                    endpoint="stock_history_ohlc",
+                    parameters={"symbol": "TQQQ", "session": session_date},
+                    dataframe=[
+                        {
+                            "timestamp": datetime.combine(
+                                session_date,
+                                datetime.min.time(),
+                                tzinfo=timezone.utc,
+                            ),
+                            "close": 50,
+                        }
+                    ],
+                )
+            ],
+            acquisition_request={"symbol": "TQQQ", "session": session_date},
+        )
+        return pilot.RawProviderArtifact(
+            provider_code="THETA_DATA",
+            request_kind=pilot.ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+            content=content,
+            mime_type=serializer.MIME_TYPE,
+            request_parameters=(("session", session_date.isoformat()),),
+            artifact_type=pilot.ProviderArtifactType.DECODED_PROVIDER_ARTIFACT,
+            format_version=serializer.FORMAT_VERSION,
+            serializer_version=serializer.SERIALIZER_VERSION,
+        )
+
+    components = (component(date(2024, 1, 2)), component(date(2024, 1, 3)))
+    forward = pilot.aggregate_artifacts(
+        components,
+        request_kind=pilot.ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+        symbol="TQQQ",
+    )
+    reversed_result = pilot.aggregate_artifacts(
+        reversed(components),
+        request_kind=pilot.ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+        symbol="TQQQ",
+    )
+    assert forward.content == reversed_result.content
+    assert forward.content_sha256 == reversed_result.content_sha256
+
+
+def test_cloud_pilot_does_not_reference_dotenv_or_frozen_direct_acquisition_helpers():
+    source = (ROOT / "scripts" / "data" / "cloud_pilot_qualification.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from_local_environment" not in source
+    assert "dotenv" not in source
+    assert "acquire_underlying_evidence" not in source
+    assert "acquire_option_evidence" not in source
