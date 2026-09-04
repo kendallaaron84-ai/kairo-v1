@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -235,3 +236,26 @@ def test_structured_log_emission_valid_json(capsys):
         "content_sha256": "b" * 64,
         "records": 42,
     }
+
+
+def test_cloud_run_deployment_uses_discrete_smoke_argument_array():
+    deployment = (ROOT / "deploy" / "deploy_cloud_run_job.sh").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'^SMOKE_ARGS="([^"]+)"$', deployment, flags=re.MULTILINE)
+    assert match is not None
+    assert ["python", *match.group(1).split(",")] == [
+        "python",
+        "scripts/data/cloud_smoke_test.py",
+        "--symbols",
+        "TQQQ",
+        "--start",
+        "2024-01-02",
+        "--end",
+        "2024-01-02",
+        "--authorize-cloud-smoke-test",
+    ]
+    assert '--command=python' in deployment
+    assert '--args="${SMOKE_ARGS}"' in deployment
+    assert "KAIRO_CLOUD_SMOKE_AUTHORIZED=1" in deployment
+    assert "--execute-now" not in deployment

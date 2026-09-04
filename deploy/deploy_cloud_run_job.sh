@@ -3,12 +3,14 @@ set -euo pipefail
 
 : "${IMAGE_URI:?Set IMAGE_URI to the immutable container image URI}"
 
+SMOKE_ARGS="scripts/data/cloud_smoke_test.py,--symbols,TQQQ,--start,2024-01-02,--end,2024-01-02,--authorize-cloud-smoke-test"
+
 gcloud run jobs deploy kairo-historical-ingestion \
   --project=kairo-research-507516 \
   --region=us-south1 \
   --image="${IMAGE_URI}" \
   --set-cloudsql-instances=kairo-research-507516:us-south1:kairo-research-db \
   --set-secrets=THETADATA_API_KEY=thetadata-api-key:latest,KAIRO_RUNTIME_DATABASE_URL=kairo-runtime-db-url:latest \
-  --set-env-vars=KAIRO_ARTIFACT_BUCKET=kairo-market-artifacts-507516 \
+  --set-env-vars=KAIRO_ARTIFACT_BUCKET=kairo-market-artifacts-507516,KAIRO_CLOUD_SMOKE_AUTHORIZED=1 \
   --command=python \
-  --args=scripts/data/cloud_smoke_test.py
+  --args="${SMOKE_ARGS}"
