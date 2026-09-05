@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
@@ -450,6 +451,39 @@ class HistoricalDatasetRegistry:
         self.session.flush()
         return artifact
 
+    def persist_staged_artifact(
+        self,
+        staged: "StagedArtifact",
+        *,
+        role: str,
+        created_at: datetime,
+    ) -> HistoricalMarketArtifact:
+        """Persist a file-backed artifact while retaining the canonical hash authority."""
+        existing = self.session.scalar(select(HistoricalMarketArtifact).where(
+            HistoricalMarketArtifact.content_sha256 == staged.content_sha256
+        ))
+        if existing:
+            if existing.artifact_role != role or existing.byte_size != staged.byte_size:
+                raise ValueError("content identity already exists with conflicting provenance")
+            return existing
+        artifact = HistoricalMarketArtifact(
+            artifact_id=uuid5(NAMESPACE_URL, f"kairo:market-artifact:{staged.content_sha256}"),
+            artifact_role=role,
+            content_sha256=staged.content_sha256,
+            mime_type=staged.mime_type,
+            byte_size=staged.byte_size,
+            storage_uri=self.storage.write_file(
+                staged.content_sha256,
+                staged.path,
+                staged.mime_type,
+                byte_size=staged.byte_size,
+            ),
+            created_at=created_at,
+        )
+        self.session.add(artifact)
+        self.session.flush()
+        return artifact
+
     @staticmethod
     def build_manifest(*, dataset_name: str, provider_name: str, calendar_version: str, normalization_policy_version: str, streams: tuple[dict, ...]) -> tuple[dict, str]:
         body = {
@@ -534,3 +568,99 @@ class HistoricalDatasetRegistry:
             normalization_policy_version=normalization_policy_version,
             streams=tuple(manifest_streams), dataset_manifest_sha256=digest,
         )
+
+    def register_staged_dataset(self, **kwargs: Any) -> DatasetManifest:
+        """Sibling of ``register_dataset`` accepting file-backed artifact descriptors."""
+        streams = tuple(kwargs.pop("streams"))
+        authority = kwargs.pop("calendar", None) or SessionCalendarResolver()
+        ingested_at = kwargs["ingested_at"]
+        manifest_streams: list[dict] = []
+        artifacts: list[tuple[HistoricalMarketArtifact, HistoricalMarketArtifact]] = []
+        ordered = sorted(streams, key=lambda value: value["stream_ordinal"])
+        for item in ordered:
+            raw = self.persist_staged_artifact(
+                item["raw_artifact"], role="RAW_PROVIDER_PAYLOAD", created_at=ingested_at
+            )
+            normalized = self.persist_staged_artifact(
+                item["normalized_artifact"],
+                role="NORMALIZED_RESEARCH_STREAM",
+                created_at=ingested_at,
+            )
+            artifacts.append((raw, normalized))
+            manifest_streams.append({
+                "instrument_id": str(item["instrument_id"]),
+                "symbol": item["symbol"],
+                "stream_role": str(item["stream_role"]),
+                "stream_ordinal": item["stream_ordinal"],
+                "raw_content_sha256": raw.content_sha256,
+                "normalized_content_sha256": normalized.content_sha256,
+                "bar_count": item["bar_count"],
+                "first_bar_start_at": item["first_bar_start_at"].isoformat(),
+                "last_bar_completed_at": item["last_bar_completed_at"].isoformat(),
+            })
+        body, digest = self.build_manifest(
+            dataset_name=kwargs["dataset_name"],
+            provider_name=kwargs["provider_name"],
+            calendar_version=authority.calendar_version,
+            normalization_policy_version=kwargs["normalization_policy_version"],
+            streams=tuple(manifest_streams),
+        )
+        dataset_id = uuid5(NAMESPACE_URL, f"kairo:historical-dataset:{digest}")
+        existing = self.session.get(HistoricalMarketDataset, dataset_id)
+        if existing is None:
+            existing = HistoricalMarketDataset(
+                dataset_id=dataset_id,
+                dataset_name=kwargs["dataset_name"],
+                provider_name=kwargs["provider_name"],
+                bar_interval_seconds=kwargs["bar_interval_seconds"],
+                source_timezone=kwargs["source_timezone"],
+                calendar_name=authority.calendar_name,
+                calendar_version=authority.calendar_version,
+                source_timestamp_convention=kwargs["source_timestamp_convention"],
+                liquidity_fidelity_tier=kwargs["liquidity_fidelity_tier"],
+                price_adjustment_mode=kwargs["price_adjustment_mode"],
+                adjustment_policy_version=kwargs["adjustment_policy_version"],
+                normalization_policy_version=kwargs["normalization_policy_version"],
+                coverage_start=min(item["first_bar_start_at"] for item in streams),
+                coverage_end=max(item["last_bar_completed_at"] for item in streams),
+                dataset_manifest_sha256=digest,
+                ingested_at=ingested_at,
+            )
+            self.session.add(existing)
+            self.session.flush()
+            for item, (raw, normalized) in zip(ordered, artifacts, strict=True):
+                self.session.add(HistoricalMarketDatasetSymbol(
+                    symbol_entry_id=uuid5(NAMESPACE_URL, f"kairo:historical-stream:{digest}:{item['stream_ordinal']}"),
+                    dataset_id=dataset_id,
+                    instrument_id=item["instrument_id"],
+                    symbol=item["symbol"],
+                    stream_role=str(item["stream_role"]),
+                    stream_ordinal=item["stream_ordinal"],
+                    raw_artifact_id=raw.artifact_id,
+                    raw_content_sha256=raw.content_sha256,
+                    normalized_artifact_id=normalized.artifact_id,
+                    normalized_content_sha256=normalized.content_sha256,
+                    bar_count=item["bar_count"],
+                    first_bar_start_at=item["first_bar_start_at"],
+                    last_bar_completed_at=item["last_bar_completed_at"],
+                ))
+            self.session.flush()
+        elif existing.dataset_manifest_sha256 != digest:
+            raise ValueError("deterministic dataset identity conflicts with persisted manifest")
+        return DatasetManifest(
+            dataset_id=dataset_id,
+            dataset_name=kwargs["dataset_name"],
+            provider_name=kwargs["provider_name"],
+            calendar_version=authority.calendar_version,
+            normalization_policy_version=kwargs["normalization_policy_version"],
+            streams=tuple(manifest_streams),
+            dataset_manifest_sha256=digest,
+        )
+
+
+@dataclass(frozen=True)
+class StagedArtifact:
+    path: Path
+    content_sha256: str
+    byte_size: int
+    mime_type: str

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
-from typing import Any, Protocol, TypeVar
+from pathlib import Path
+from typing import Any, BinaryIO, Protocol, TypeVar
+from uuid import uuid4
 
 
 THETA_DECODED_FORMAT_VERSION = "THETA_PROTOBUF_DECODED-v1"
@@ -16,6 +19,7 @@ THETA_DECODED_FORMAT_VERSION = "THETA_PROTOBUF_DECODED-v1"
 class Blob(Protocol):
     def exists(self) -> bool: ...
     def download_as_bytes(self) -> bytes: ...
+    def download_to_file(self, file_obj: BinaryIO) -> None: ...
     def upload_from_string(
         self,
         data: bytes,
@@ -154,6 +158,12 @@ class GCSCheckpointStore:
         return self._bucket.blob(self.checkpoint_path(unit)).exists()
 
     def load(self, unit: AcquisitionUnit) -> CheckpointMetadata:
+        metadata = self.load_metadata(unit)
+        self.read_artifact(metadata)
+        return metadata
+
+    def load_metadata(self, unit: AcquisitionUnit) -> CheckpointMetadata:
+        """Load canonical checkpoint metadata without materializing provider bytes."""
         blob = self._bucket.blob(self.checkpoint_path(unit))
         if not blob.exists():
             raise FileNotFoundError(f"checkpoint is absent for unit {unit.unit_key}")
@@ -166,8 +176,45 @@ class GCSCheckpointStore:
         if metadata.canonical_bytes() != content:
             raise ValueError("checkpoint metadata is not canonical")
         self._validate_metadata(unit, metadata)
-        self.read_artifact(metadata)
         return metadata
+
+    def materialize_artifact(
+        self,
+        metadata: CheckpointMetadata,
+        destination: str | Path,
+    ) -> tuple[str, int]:
+        """Download one provider unit to disk and validate it incrementally."""
+        _validate_digest(metadata.content_sha256)
+        if metadata.format_version != THETA_DECODED_FORMAT_VERSION:
+            raise ValueError("checkpoint provider artifact format version drift")
+        if metadata.serializer_version == "":
+            raise ValueError("checkpoint provider artifact serializer version is absent")
+        blob = self._bucket.blob(self.artifact_path(metadata.content_sha256))
+        if not blob.exists():
+            raise ValueError("checkpoint references an absent provider artifact")
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        try:
+            with temporary.open("xb") as raw:
+                blob.download_to_file(raw)
+                raw.flush()
+                os.fsync(raw.fileno())
+            digest = hashlib.sha256()
+            byte_size = 0
+            with temporary.open("rb") as raw:
+                while chunk := raw.read(8 * 1024 * 1024):
+                    digest.update(chunk)
+                    byte_size += len(chunk)
+            if digest.hexdigest() != metadata.content_sha256:
+                raise ValueError("checkpoint provider artifact SHA-256 mismatch")
+            temporary.replace(target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return digest.hexdigest(), byte_size
 
     def read_artifact(self, metadata: CheckpointMetadata) -> bytes:
         """Materialize and verify the byte-exact artifact named by metadata."""

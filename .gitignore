@@ -43,3 +43,5 @@ next-env.d.ts
 /work/
 
 data/
+!backend/engine/data/
+!backend/engine/data/streaming_pilot.py

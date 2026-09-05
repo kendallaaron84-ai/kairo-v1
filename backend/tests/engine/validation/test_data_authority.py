@@ -17,6 +17,7 @@ from app.db.models.historical import HistoricalMarketArtifact, HistoricalMarketD
 from engine.strategy.option_resolver import OptionContractCandidate, is_legacy_eligible
 from engine.validation.adapter import HistoricalReplayAdapter
 from engine.validation.feed_loader import DataNormalizer, HistoricalDatasetRegistry
+from engine.data.streaming_pilot import staged_artifact
 from engine.validation.models import SourceTimestampConvention, StreamRole
 from engine.validation.session_calendar import SessionCalendarResolver
 
@@ -81,6 +82,57 @@ def test_raw_market_artifact_persists_with_exact_sha256_digest(db_session, tmp_p
     content = b"provider bytes\r\nexact"
     row = HistoricalDatasetRegistry(db_session, tmp_path).persist_artifact(content, role="RAW_PROVIDER_PAYLOAD", mime_type="application/json", created_at=NOW)
     assert row.content_sha256 == hashlib.sha256(content).hexdigest()
+
+
+def test_staged_dataset_registration_is_identity_equivalent_to_byte_path(
+    db_session, instruments, tmp_path
+):
+    raw_bytes = b"provider-artifact-byte-equivalence"
+    normalized_bytes = b'[{"canonical":"equivalence"}]'
+    raw_path = tmp_path / "raw.bin"
+    normalized_path = tmp_path / "normalized.json"
+    raw_path.write_bytes(raw_bytes)
+    normalized_path.write_bytes(normalized_bytes)
+    common = {
+        "instrument_id": instruments[0].instrument_id,
+        "symbol": instruments[0].symbol,
+        "stream_role": StreamRole.UNDERLYING_SIGNAL_BARS,
+        "stream_ordinal": 0,
+        "bar_count": 1,
+        "first_bar_start_at": NOW,
+        "last_bar_completed_at": NOW,
+    }
+    kwargs = dict(
+        dataset_name="STAGED-EQUIVALENCE",
+        provider_name="THETA_DATA",
+        bar_interval_seconds=60,
+        source_timezone="America/New_York",
+        source_timestamp_convention="INTERVAL_BEGIN",
+        liquidity_fidelity_tier="TIER_1_QUOTE_DEPTH",
+        price_adjustment_mode="RAW_UNADJUSTED",
+        adjustment_policy_version=None,
+        normalization_policy_version="NORM-PILOT-CORPUS-v1",
+        ingested_at=NOW,
+    )
+    staged = HistoricalDatasetRegistry(db_session, tmp_path / "staged-store").register_staged_dataset(
+        **kwargs,
+        streams=({
+            **common,
+            "raw_artifact": staged_artifact(raw_path, "application/octet-stream"),
+            "normalized_artifact": staged_artifact(normalized_path, "application/json"),
+        },),
+    )
+    legacy = HistoricalDatasetRegistry(db_session, tmp_path / "legacy-store").register_dataset(
+        **kwargs,
+        streams=({
+            **common,
+            "raw_bytes": raw_bytes,
+            "normalized_bytes": normalized_bytes,
+        },),
+    )
+    assert staged.dataset_id == legacy.dataset_id
+    assert staged.dataset_manifest_sha256 == legacy.dataset_manifest_sha256
+    assert staged.streams == legacy.streams
 
 
 def test_dataset_symbols_enforces_non_null_canonical_instrument_id(db_session, instruments):

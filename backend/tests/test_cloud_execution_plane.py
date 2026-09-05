@@ -3,12 +3,17 @@ import hashlib
 import importlib.util
 import json
 import re
+from datetime import timedelta
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
+from types import SimpleNamespace
+from uuid import uuid4
+from decimal import Decimal
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from app.infrastructure.storage.gcs_checkpoint import (
     AcquisitionUnit,
@@ -16,7 +21,41 @@ from app.infrastructure.storage.gcs_checkpoint import (
     acquire_or_resume,
     emit_structured_log,
 )
-from engine.data.theta_v3 import ThetaDecodedArtifactSerializer
+from engine.data.theta_v3 import (
+    DecodedThetaSection,
+    ThetaDecodedArtifactReader,
+    ThetaDecodedArtifactSerializer,
+)
+from app.domain.enums import OptionRight
+from engine.data.corpus_qualifier import (
+    CorpusQualificationEngine,
+    CorpusQualificationInput,
+    PilotDecisionPoint,
+)
+from engine.data.option_enrollment import CanonicalResolutionAccounting
+from engine.data.provider_adapter import ProviderArtifactType, RawProviderArtifact, ThetaDataProviderAdapter
+from engine.data.streaming_pilot import (
+    CanonicalJsonArrayWriter,
+    OptionDiscoverySpool,
+    RSS_BUDGET_MIB,
+    RssBudgetTracker,
+    SessionLiquidityIndex,
+    StagedProviderUnit,
+    StagedCorpusQualificationInput,
+    ThetaDecodedArtifactExternalMerger,
+    enforce_rss_budget,
+    normalize_staged_option_unit,
+    persist_staged_pilot_atomically,
+    qualify_staged,
+    staged_artifact,
+)
+from engine.validation.models import (
+    CanonicalMarketBar,
+    CanonicalOptionChainSnapshot,
+    CanonicalOptionContractQuote,
+    StreamRole,
+)
+from engine.validation.feed_loader import HistoricalDatasetRegistry
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +74,11 @@ class FakeBlob:
         if self.data is None:
             raise FileNotFoundError
         return self.data
+
+    def download_to_file(self, file_obj) -> None:
+        if self.data is None:
+            raise FileNotFoundError
+        file_obj.write(self.data)
 
     def upload_from_string(
         self,
@@ -330,6 +374,16 @@ def test_underlying_and_option_units_use_frozen_resume_granularity():
     assert option.strikes_each_side == 10
 
 
+def test_attempt_4_unit_keys_remain_compatible_with_existing_checkpoints():
+    pilot = load_pilot_module()
+    assert pilot.underlying_unit("TQQQ", date(2024, 1, 2)).unit_key == (
+        "699c240f8c39f8f0be786fff78448ffe0fb715eded70bb0288620e8d6f78be02"
+    )
+    assert pilot.option_unit(
+        "TQQQ", datetime(2024, 1, 2, 15, 31, tzinfo=timezone.utc)
+    ).unit_key == "7ba4f630ee60e6020d63176f03dffe8b85d410e13383928c2405bd5e6c78edac"
+
+
 def test_cloud_pilot_requires_dual_authorization_and_stable_storage_mount():
     pilot = load_pilot_module()
     calendar = Mock()
@@ -490,3 +544,449 @@ def test_cloud_pilot_does_not_reference_dotenv_or_frozen_direct_acquisition_help
     assert "dotenv" not in source
     assert "acquire_underlying_evidence" not in source
     assert "acquire_option_evidence" not in source
+
+
+def test_checkpoint_metadata_resume_does_not_materialize_provider_payload():
+    checkpoint_store, client = store()
+    payload = Artifact(b"large-provider-unit")
+    expected = checkpoint_store.seal(
+        unit(), payload, record_count=7,
+        sealed_at=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    artifact_blob = client.value.blobs[
+        checkpoint_store.artifact_path(expected.content_sha256)
+    ]
+    artifact_blob.download_as_bytes = Mock(side_effect=AssertionError("payload retained"))
+    assert checkpoint_store.load_metadata(unit()) == expected
+    artifact_blob.download_as_bytes.assert_not_called()
+
+
+def test_sealed_checkpoint_resume_never_spawns_provider_worker(monkeypatch):
+    pilot = load_pilot_module()
+    checkpoint_store, _ = store()
+    acquisition = unit()
+    expected = checkpoint_store.seal(
+        acquisition, Artifact(b"sealed-before-resume"), record_count=4,
+        sealed_at=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        pilot.multiprocessing,
+        "get_context",
+        Mock(side_effect=AssertionError("provider worker must not start")),
+    )
+    actual = pilot.ensure_checkpoint(
+        checkpoint_store,
+        acquisition,
+        api_key="not-used-for-resume",
+        bucket_name="kairo-market-artifacts-507516",
+    )
+    assert actual == expected
+
+
+def test_checkpoint_materialization_streams_and_verifies_bytes(tmp_path):
+    checkpoint_store, client = store()
+    payload = Artifact(b"x" * (2 * 1024 * 1024))
+    metadata = checkpoint_store.seal(
+        unit(), payload, record_count=1,
+        sealed_at=datetime(2026, 9, 4, 12, tzinfo=timezone.utc),
+    )
+    artifact_blob = client.value.blobs[checkpoint_store.artifact_path(metadata.content_sha256)]
+    artifact_blob.download_as_bytes = Mock(side_effect=AssertionError("whole-object download"))
+    target = tmp_path / "unit.bin"
+    digest, size = checkpoint_store.materialize_artifact(metadata, target)
+    assert digest == metadata.content_sha256
+    assert size == len(payload.content)
+    assert target.read_bytes() == payload.content
+
+
+def test_external_frame_merger_is_byte_identical_to_reference_aggregate(tmp_path):
+    pilot = load_pilot_module()
+    serializer = ThetaDecodedArtifactSerializer()
+    components = []
+    artifacts = []
+    for index, session_date in enumerate((date(2024, 1, 2), date(2024, 1, 3))):
+        content = serializer.serialize(
+            [pilot.DecodedThetaSection(
+                endpoint="stock_history_ohlc",
+                parameters={"symbol": "TQQQ", "session": session_date},
+                dataframe=[{
+                    "timestamp": datetime(2024, 1, 2 + index, 14, 30, tzinfo=timezone.utc),
+                    "open": Decimal("50.00") + index,
+                    "high": Decimal("51.00") + index,
+                    "low": Decimal("49.00") + index,
+                    "close": Decimal("50.50") + index,
+                    "volume": 100 + index,
+                }],
+            )],
+            acquisition_request={"symbol": "TQQQ", "session": session_date},
+        )
+        raw = RawProviderArtifact(
+            provider_code="THETA_DATA",
+            request_kind=ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+            content=content,
+            mime_type=serializer.MIME_TYPE,
+            request_parameters=(),
+            artifact_type=ProviderArtifactType.DECODED_PROVIDER_ARTIFACT,
+            format_version=serializer.FORMAT_VERSION,
+            serializer_version=serializer.SERIALIZER_VERSION,
+        )
+        path = tmp_path / f"component-{index}.bin"
+        path.write_bytes(content)
+        artifacts.append(staged_artifact(path, serializer.MIME_TYPE))
+        components.append(raw)
+    reference = pilot.aggregate_artifacts(
+        tuple(reversed(components)),
+        request_kind=ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+        symbol="TQQQ",
+    )
+    staged = ThetaDecodedArtifactExternalMerger(tmp_path / "work").merge(
+        tuple(reversed(artifacts)),
+        request_kind=ThetaDataProviderAdapter.BAR_REQUEST_KIND,
+        symbol="TQQQ",
+        output_path=tmp_path / "merged.bin",
+    )
+    assert staged.content_sha256 == reference.content_sha256
+    assert staged.path.read_bytes() == reference.content
+
+
+class _AppendOnlyFakeSession:
+    def __init__(self):
+        self.added = []
+
+    def scalar(self, _statement):
+        return None
+
+    def get(self, _model, _identity):
+        return None
+
+    def add(self, value):
+        self.added.append(value)
+
+    def flush(self):
+        return None
+
+
+def test_staged_registry_preserves_dataset_and_stream_uuid_identities(tmp_path):
+    raw = b"raw-provider-bytes"
+    normalized = b'[{"normalized":true}]'
+    raw_path = tmp_path / "raw.bin"
+    normalized_path = tmp_path / "normalized.json"
+    raw_path.write_bytes(raw)
+    normalized_path.write_bytes(normalized)
+    instrument_id = uuid4()
+    common_stream = {
+        "instrument_id": instrument_id,
+        "symbol": "TQQQ",
+        "stream_role": StreamRole.UNDERLYING_SIGNAL_BARS,
+        "stream_ordinal": 0,
+        "bar_count": 1,
+        "first_bar_start_at": datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc),
+        "last_bar_completed_at": datetime(2024, 1, 2, 14, 31, tzinfo=timezone.utc),
+    }
+    calendar = SimpleNamespace(
+        calendar_name="XNYS", calendar_version="CAL-US-EQUITIES-2026-v1"
+    )
+    kwargs = dict(
+        dataset_name="THETA-PILOT-2024-01-02-2024-03-28",
+        provider_name="THETA_DATA", bar_interval_seconds=60,
+        source_timezone="America/New_York",
+        source_timestamp_convention="INTERVAL_BEGIN",
+        liquidity_fidelity_tier="TIER_1_QUOTE_DEPTH",
+        price_adjustment_mode="RAW_UNADJUSTED", adjustment_policy_version=None,
+        normalization_policy_version="NORM-PILOT-CORPUS-v1",
+        ingested_at=datetime(2026, 9, 4, tzinfo=timezone.utc), calendar=calendar,
+    )
+    legacy = HistoricalDatasetRegistry(
+        _AppendOnlyFakeSession(), tmp_path / "legacy-store"
+    ).register_dataset(
+        **kwargs,
+        streams=({
+            **common_stream, "raw_bytes": raw, "normalized_bytes": normalized,
+        },),
+    )
+    staged = HistoricalDatasetRegistry(
+        _AppendOnlyFakeSession(), tmp_path / "staged-store"
+    ).register_staged_dataset(
+        **kwargs,
+        streams=({
+            **common_stream,
+            "raw_artifact": staged_artifact(raw_path, "application/octet-stream"),
+            "normalized_artifact": staged_artifact(normalized_path, "application/json"),
+        },),
+    )
+    assert staged.dataset_id == legacy.dataset_id
+    assert staged.dataset_manifest_sha256 == legacy.dataset_manifest_sha256
+    assert staged.streams == legacy.streams
+
+
+def test_staged_pilot_persistence_rolls_back_as_one_transaction():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE staged_atomicity (value INTEGER NOT NULL)"))
+
+    def fail_after_write(session):
+        session.execute(text("INSERT INTO staged_atomicity(value) VALUES (1)"))
+        raise RuntimeError("qualification failed")
+
+    with pytest.raises(RuntimeError, match="qualification failed"):
+        persist_staged_pilot_atomically(engine, fail_after_write)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT COUNT(*) FROM staged_atomicity")) == 0
+    engine.dispose()
+
+
+class _OneMinuteCalendar:
+    eastern = timezone.utc
+    calendar_version = "TEST-CALENDAR-v1"
+
+    @staticmethod
+    def sessions(start, end):
+        opened = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+        return ((start, opened, opened + timedelta(minutes=1)),)
+
+
+def _qualification_case(verdict: str):
+    instrument_id = uuid4()
+    signal = datetime(2024, 1, 2, 15, 31, tzinfo=timezone.utc)
+    bar = CanonicalMarketBar(
+        instrument_id=instrument_id, symbol="TQQQ",
+        interval_start_at=signal - timedelta(minutes=1), completed_at=signal,
+        open=Decimal("50"), high=Decimal("51"), low=Decimal("49"),
+        close=Decimal("50"), volume=Decimal("100"),
+    )
+    decision_count = 1 if verdict != "REVIEW" else 10
+    complete_count = 1 if verdict == "PASS" else 9 if verdict == "REVIEW" else 0
+    decisions = tuple(
+        PilotDecisionPoint(
+            underlying_instrument_id=instrument_id,
+            symbol="TQQQ",
+            signal_at=signal + timedelta(minutes=index),
+            underlying_spot=Decimal("50"),
+        ) for index in range(decision_count)
+    )
+    snapshots = []
+    for index, decision in enumerate(decisions):
+        contracts = []
+        if index < complete_count:
+            for dte in (0, 1, 7, 14, 30):
+                for right in (OptionRight.CALL, OptionRight.PUT):
+                    for strike_int in range(40, 61):
+                        strike = Decimal(str(strike_int))
+                        contracts.append(CanonicalOptionContractQuote(
+                            contract_instrument_id=uuid4(),
+                            underlying_instrument_id=instrument_id,
+                            underlying_symbol="TQQQ",
+                            canonical_contract_symbol=f"TQQQ-{dte}-{right.value}-{strike_int}",
+                            expiration_date=date(2024, 1, 2) + timedelta(days=dte),
+                            strike_price=strike,
+                            option_right=right,
+                            contract_multiplier=Decimal("100"),
+                            listing_type="STANDARD",
+                            bid_price=Decimal("1"), ask_price=Decimal("1.1"),
+                            bid_size=Decimal("10"), ask_size=Decimal("10"),
+                            volume=None, open_interest=None, liquidity_verifiable=False,
+                        ))
+        snapshots.append(CanonicalOptionChainSnapshot(
+            underlying_instrument_id=instrument_id,
+            underlying_symbol="TQQQ",
+            canonical_completed_at=decision.signal_at,
+            contracts=tuple(contracts),
+        ))
+    accounting = CanonicalResolutionAccounting(
+        discovered_contracts_count=1,
+        resolved_existing_contracts_count=1,
+        newly_enrolled_contracts_count=0,
+        resolved_contracts_count=1,
+        rejected_contracts_count=0,
+    )
+    return (bar,), tuple(snapshots), decisions, accounting
+
+
+@pytest.mark.parametrize("expected_verdict", ["PASS", "REVIEW", "FAIL"])
+def test_streaming_qualification_is_byte_identical_for_all_outcomes(tmp_path, expected_verdict):
+    bars, snapshots, decisions, accounting = _qualification_case(expected_verdict)
+    bar_path = tmp_path / "bars.json"
+    option_path = tmp_path / "options.json"
+    with CanonicalJsonArrayWriter(bar_path) as writer:
+        for item in bars:
+            writer.append(item)
+    with CanonicalJsonArrayWriter(option_path) as writer:
+        for item in snapshots:
+            writer.append(item)
+    raw_hash = hashlib.sha256(b"raw").hexdigest()
+    dataset_hash = hashlib.sha256(b"dataset").hexdigest()
+    qualifier = CorpusQualificationEngine(SimpleNamespace(), _OneMinuteCalendar())
+    reference = qualifier.qualify(CorpusQualificationInput(
+        provider_code="THETA_DATA", start_session=date(2024, 1, 2),
+        end_session=date(2024, 1, 2), symbols=("TQQQ",), bars=bars,
+        option_snapshots=snapshots, decision_points=decisions,
+        raw_artifact_sha256s=(raw_hash,),
+        normalized_dataset_manifest_sha256=dataset_hash,
+        resolution_accounting=accounting,
+    ))
+    actual = qualify_staged(qualifier, StagedCorpusQualificationInput(
+        provider_code="THETA_DATA", start_session=date(2024, 1, 2),
+        end_session=date(2024, 1, 2), symbols=("TQQQ",),
+        bar_artifacts=(staged_artifact(bar_path, "application/json"),),
+        option_snapshot_artifacts=(staged_artifact(option_path, "application/json"),),
+        decision_points=decisions, raw_artifact_sha256s=(raw_hash,),
+        normalized_dataset_manifest_sha256=dataset_hash,
+        resolution_accounting=accounting,
+    ))
+    assert actual.overall_qualification_verdict == expected_verdict
+    assert actual.qualification_manifest_id == reference.qualification_manifest_id
+    assert actual.qualification_manifest_sha256 == reference.qualification_manifest_sha256
+    assert actual.metrics == reference.metrics
+    assert actual.canonical_bytes() == reference.canonical_bytes()
+
+
+def test_rss_budget_is_a_hard_fail_closed_gate(monkeypatch):
+    monkeypatch.setattr("engine.data.streaming_pilot.current_rss_mib", lambda: RSS_BUDGET_MIB - 1)
+    assert enforce_rss_budget("steady-state") == RSS_BUDGET_MIB - 1
+    monkeypatch.setattr("engine.data.streaming_pilot.current_rss_mib", lambda: RSS_BUDGET_MIB)
+    with pytest.raises(MemoryError, match="RSS budget exceeded"):
+        enforce_rss_budget("steady-state")
+
+
+def test_rss_tracker_rejects_class_b_growth_even_below_hard_ceiling(monkeypatch):
+    readings = iter((500.0, 520.0, 700.0))
+    monkeypatch.setattr("engine.data.streaming_pilot.current_rss_mib", lambda: next(readings))
+    tracker = RssBudgetTracker()
+    tracker.sample("option-100", 100)
+    tracker.sample("option-1000", 1000)
+    tracker.sample("option-4500", 4500)
+    with pytest.raises(MemoryError, match="Class-B accumulation"):
+        tracker.assert_bounded_growth()
+
+
+def test_rss_tracker_accepts_bounded_4500_unit_working_set(monkeypatch):
+    readings = iter((500.0, 504.0, 506.0, 505.0))
+    monkeypatch.setattr("engine.data.streaming_pilot.current_rss_mib", lambda: next(readings))
+    tracker = RssBudgetTracker()
+    for unit_count in (100, 1000, 2500, 4500):
+        tracker.sample(f"option-{unit_count}", unit_count)
+    tracker.assert_bounded_growth()
+
+
+def test_cloud_wrapper_retains_only_descriptors_across_acquisition_loops():
+    source = (ROOT / "scripts" / "data" / "cloud_pilot_qualification.py").read_text(encoding="utf-8")
+    assert "ensure_checkpoint(" in source
+    assert "multiprocessing.get_context(\"spawn\")" in source
+    assert "option_components" not in source
+    assert "underlying_components" not in source
+    assert "persist_staged_qualification(" in source
+
+
+def test_canonical_array_writer_matches_frozen_normalized_bytes(tmp_path):
+    bars, _, _, _ = _qualification_case("PASS")
+    path = tmp_path / "canonical.json"
+    with CanonicalJsonArrayWriter(path) as writer:
+        for bar in bars:
+            writer.append(bar)
+    from engine.validation.feed_loader import DataNormalizer
+
+    assert path.read_bytes() == DataNormalizer.normalized_bytes(bars)
+
+
+def test_discovery_spool_deduplicates_contracts_on_canonical_identity(tmp_path):
+    observed = datetime(2024, 1, 2, 15, 31, tzinfo=timezone.utc)
+    sections = [SimpleNamespace(
+        endpoint="option_history_quote",
+        parameters={"symbol": "TQQQ", "expiration": date(2024, 1, 5)},
+        records=(
+            {"strike": "50.0", "right": "C", "timestamp": observed},
+            {"strike": Decimal("50.00"), "right": "CALL", "timestamp": observed + timedelta(minutes=1)},
+            {"strike": "bad", "right": "C", "timestamp": observed},
+            {"strike": "bad", "right": "C", "timestamp": observed},
+        ),
+    )]
+    with OptionDiscoverySpool(tmp_path / "discoveries.sqlite3", "TQQQ") as spool:
+        spool.ingest_sections(sections)
+        discoveries = [item for batch in spool.enrollment_batches(batch_size=1) for item in batch]
+    assert len(discoveries) == 2
+    assert str(discoveries[0]["strike"]) in {"50.0", "50.00"}
+    assert discoveries[1]["strike"] == "bad"
+
+
+def test_session_liquidity_index_selects_latest_typed_oi(tmp_path):
+    session_date = date(2024, 1, 2)
+    expiration = date(2024, 1, 5)
+    with SessionLiquidityIndex(tmp_path / "liquidity.sqlite3") as index:
+        index.ingest_sections((SimpleNamespace(
+            endpoint="option_history_open_interest",
+            parameters={"date": session_date, "expiration": expiration},
+            records=(
+                {"strike": "50", "right": "CALL", "timestamp": datetime(2024, 1, 2, 11, tzinfo=timezone.utc), "open_interest": 9},
+                {"strike": "50", "right": "C", "timestamp": datetime(2024, 1, 2, 12, tzinfo=timezone.utc), "open_interest": 12},
+            ),
+        ),))
+        sections = index.sections_for(session_date)
+    assert len(sections) == 1
+    assert len(sections[0].records) == 1
+    assert sections[0].records[0]["open_interest"] == 12
+
+
+def test_single_unit_option_normalization_uses_indexed_session_oi(tmp_path):
+    session_date = date(2024, 1, 2)
+    expiration = date(2024, 1, 5)
+    observed = datetime(2024, 1, 2, 15, 31, tzinfo=timezone.utc)
+    serializer = ThetaDecodedArtifactSerializer()
+    content = serializer.serialize((
+        DecodedThetaSection(
+            endpoint="option_history_quote",
+            parameters={
+                "symbol": "TQQQ", "date": session_date, "expiration": expiration,
+                "end_time": observed.time().replace(tzinfo=None),
+            },
+            dataframe=[{
+                "strike": Decimal("50"), "right": "CALL", "timestamp": observed,
+                "bid": Decimal("1"), "ask": Decimal("1.1"),
+                "bid_size": 10, "ask_size": 11,
+            }],
+        ),
+        DecodedThetaSection(
+            endpoint="option_history_open_interest",
+            parameters={"date": session_date, "expiration": expiration},
+            dataframe=[{
+                "strike": Decimal("50"), "right": "CALL", "timestamp": observed,
+                "open_interest": 1,
+            }],
+        ),
+    ), acquisition_request={"symbol": "TQQQ"})
+    artifact_path = tmp_path / "unit.bin"
+    artifact_path.write_bytes(content)
+    unit_descriptor = StagedProviderUnit(
+        unit_key="a" * 64, symbol="TQQQ", session=session_date, signal_at=observed,
+        artifact=staged_artifact(artifact_path, serializer.MIME_TYPE), record_count=2,
+    )
+    with OptionDiscoverySpool(tmp_path / "discoveries.sqlite3", "TQQQ") as spool, SessionLiquidityIndex(
+        tmp_path / "liquidity.sqlite3"
+    ) as liquidity:
+        decoded = ThetaDecodedArtifactReader().read(
+            content, expected_content_sha256=hashlib.sha256(content).hexdigest()
+        )
+        spool.ingest_sections(decoded.sections)
+        spool.record_accepted(((expiration, Decimal("50"), OptionRight.CALL),))
+        liquidity.ingest_sections((SimpleNamespace(
+            endpoint="option_history_open_interest",
+            parameters={"date": session_date, "expiration": expiration},
+            records=({
+                "strike": Decimal("50"), "right": "CALL",
+                "timestamp": observed + timedelta(minutes=1), "open_interest": 99,
+            },),
+        ),))
+        normalizer = Mock()
+        normalizer.normalize_theta_option_sections.return_value = ("snapshot",)
+        result = normalize_staged_option_unit(
+            unit_descriptor,
+            normalizer=normalizer,
+            underlying_instrument_id=uuid4(),
+            symbol="TQQQ",
+            discovery_spool=spool,
+            liquidity_index=liquidity,
+        )
+    assert result == ("snapshot",)
+    sections = normalizer.normalize_theta_option_sections.call_args.args[0]
+    oi_sections = [item for item in sections if item.endpoint == "option_history_open_interest"]
+    assert len(oi_sections) == 1
+    assert oi_sections[0].records[0]["open_interest"] == 99
