@@ -649,6 +649,82 @@ def test_external_frame_merger_is_byte_identical_to_reference_aggregate(tmp_path
     assert staged.path.read_bytes() == reference.content
 
 
+def test_valid_option_aggregate_is_reused_without_external_merge(tmp_path, capsys):
+    pilot = load_pilot_module()
+    serializer = ThetaDecodedArtifactSerializer()
+    content = serializer.serialize(
+        [pilot.DecodedThetaSection(
+            endpoint="option_history_quote",
+            parameters={"symbol": "TQQQ", "session": date(2024, 1, 2)},
+            dataframe=[],
+        )],
+        acquisition_request={"symbol": "TQQQ"},
+    )
+    aggregate_path = tmp_path / "aggregates" / "TQQQ-options.bin"
+    aggregate_path.parent.mkdir(parents=True)
+    aggregate_path.write_bytes(content)
+
+    class NoMerge:
+        def merge(self, *_args, **_kwargs):
+            raise AssertionError("a verified aggregate must bypass the external merger")
+
+    artifact = pilot.reuse_or_merge_aggregate(
+        NoMerge(),
+        (),
+        request_kind=ThetaDataProviderAdapter.OPTION_REQUEST_KIND,
+        symbol="TQQQ",
+        output_path=aggregate_path,
+    )
+
+    assert artifact.path == aggregate_path.resolve()
+    assert artifact.byte_size == len(content)
+    assert artifact.content_sha256 == hashlib.sha256(content).hexdigest()
+    assert capsys.readouterr().out == (
+        f"Aggregate for TQQQ verified ({len(content)} bytes). "
+        "Skipping external merge.\n"
+    )
+
+
+def test_invalid_option_aggregate_falls_through_to_external_merge(tmp_path):
+    pilot = load_pilot_module()
+    aggregate_path = tmp_path / "aggregates" / "TQQQ-options.bin"
+    aggregate_path.parent.mkdir(parents=True)
+    aggregate_path.write_bytes(ThetaDecodedArtifactSerializer.MAGIC + b"truncated")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"replacement")
+    expected = staged_artifact(replacement, "application/octet-stream")
+
+    class RecordingMerger:
+        def __init__(self):
+            self.calls = []
+
+        def merge(self, components, **kwargs):
+            self.calls.append((components, kwargs))
+            return expected
+
+    merger = RecordingMerger()
+    component = staged_artifact(replacement, "application/octet-stream")
+    actual = pilot.reuse_or_merge_aggregate(
+        merger,
+        (component,),
+        request_kind=ThetaDataProviderAdapter.OPTION_REQUEST_KIND,
+        symbol="TQQQ",
+        output_path=aggregate_path,
+    )
+
+    assert actual == expected
+    assert merger.calls == [
+        (
+            (component,),
+            {
+                "request_kind": ThetaDataProviderAdapter.OPTION_REQUEST_KIND,
+                "symbol": "TQQQ",
+                "output_path": aggregate_path,
+            },
+        )
+    ]
+
+
 class _AppendOnlyFakeSession:
     def __init__(self):
         self.added = []

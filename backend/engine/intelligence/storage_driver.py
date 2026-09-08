@@ -6,6 +6,8 @@ from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 from uuid import uuid4
 
+from google.cloud import storage as google_storage
+
 
 MIME_SUFFIXES = {
     "application/json": ".json",
@@ -115,3 +117,37 @@ class LocalContentAddressedStorage:
         except ValueError as exc:
             raise ValueError("storage URI escapes the configured intelligence root") from exc
         return path.read_bytes()
+
+
+class GCSReadOnlyArtifactStorage:
+    """Read immutable canonical artifacts through the GCS HTTPS API only."""
+
+    FORBIDDEN_PREFIXES = (".attempt-4-staging-v1/",)
+
+    def __init__(
+        self,
+        *,
+        expected_bucket: str | None = None,
+        client: google_storage.Client | None = None,
+    ) -> None:
+        self.expected_bucket = expected_bucket
+        self.client = client or google_storage.Client()
+
+    def read_bytes(self, storage_uri: str) -> bytes:
+        parsed = urlparse(storage_uri)
+        if parsed.scheme != "gs" or not parsed.netloc or parsed.query or parsed.fragment:
+            raise ValueError("artifact URI must be a canonical gs:// object URI")
+        if self.expected_bucket and parsed.netloc != self.expected_bucket:
+            raise ValueError("artifact URI does not belong to the configured GCS bucket")
+
+        object_name = unquote(parsed.path.lstrip("/"))
+        if not object_name or "\\" in object_name:
+            raise ValueError("artifact URI contains an invalid GCS object name")
+        parts = tuple(part for part in object_name.split("/") if part)
+        if any(part in (".", "..") for part in parts):
+            raise ValueError("artifact URI contains a non-canonical object path")
+        if any(object_name.startswith(prefix) for prefix in self.FORBIDDEN_PREFIXES):
+            raise ValueError("active acquisition staging objects are not API-readable")
+
+        blob = self.client.bucket(parsed.netloc).blob(object_name)
+        return blob.download_as_bytes(checksum="auto", retry=None, timeout=60)

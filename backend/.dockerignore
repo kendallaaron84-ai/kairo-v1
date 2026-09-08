@@ -1,0 +1,9 @@
+.env
+.env.*
+.pytest_cache
+.venv
+**/__pycache__
+**/*.pyc
+alembic
+alembic.ini
+tests

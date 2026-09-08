@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import queue as queue_module
 import shutil
+import struct
 import sys
 import tempfile
 from collections import defaultdict
@@ -310,6 +311,61 @@ def read_staged_provider(unit: StagedProviderUnit, request_kind: str) -> RawProv
     )
     ThetaDecodedArtifactReader().read_provider_artifact(artifact)
     return artifact
+
+
+def aggregate_framing_matches_file_size(path: Path) -> bool:
+    """Reject truncated or oversized frames without allocating their payloads."""
+    total_size = path.stat().st_size
+    magic = ThetaDecodedArtifactSerializer.MAGIC
+    with path.open("rb") as stream:
+        if stream.read(len(magic)) != magic:
+            return False
+        while stream.tell() < total_size:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                return False
+            frame_size = struct.unpack(">Q", prefix)[0]
+            if frame_size > total_size - stream.tell():
+                return False
+            stream.seek(frame_size, os.SEEK_CUR)
+        return stream.tell() == total_size
+
+
+def reuse_or_merge_aggregate(
+    merger: ThetaDecodedArtifactExternalMerger,
+    components: Iterable[StagedArtifact],
+    *,
+    request_kind: str,
+    symbol: str,
+    output_path: Path,
+) -> StagedArtifact:
+    """Reuse only a complete, frame-valid aggregate without re-merging."""
+    if output_path.exists() and output_path.stat().st_size > 0:
+        try:
+            if not aggregate_framing_matches_file_size(output_path):
+                raise ValueError(f"existing aggregate framing is invalid: {output_path}")
+            candidate = staged_artifact(
+                output_path, ThetaDecodedArtifactSerializer.MIME_TYPE
+            )
+            for _section in iter_decoded_sections(candidate):
+                pass
+            print(
+                f"Aggregate for {symbol} verified "
+                f"({candidate.byte_size} bytes). Skipping external merge.",
+                flush=True,
+            )
+            return candidate
+        except (OSError, TypeError, ValueError) as ex:
+            print(
+                f"[AGGREGATE_REUSE_FAILED] Could not reuse aggregate for {symbol} ({request_kind}): {ex}; falling back to external merge",
+                flush=True,
+            )
+    return merger.merge(
+        tuple(components),
+        request_kind=request_kind,
+        symbol=symbol,
+        output_path=output_path,
+    )
 
 
 def acquire_unit(
@@ -744,7 +800,8 @@ def main(argv: list[str] | None = None) -> int:
             for symbol in symbols
         }
         option_raw = {
-            symbol: merger.merge(
+            symbol: reuse_or_merge_aggregate(
+                merger,
                 [item.artifact for item in option_units[symbol]],
                 request_kind=ThetaDataProviderAdapter.OPTION_REQUEST_KIND,
                 symbol=symbol,

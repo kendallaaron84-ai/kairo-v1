@@ -7,6 +7,8 @@ from app.config import get_settings
 
 def main() -> None:
     settings = get_settings()
+    if not settings.database_url:
+        raise RuntimeError("KAIRO_DATABASE_URL is required for database bootstrap")
     if not settings.runtime_database_password:
         raise RuntimeError("KAIRO_RUNTIME_PASSWORD is required")
     if settings.runtime_database_user != "kairo_runtime":
