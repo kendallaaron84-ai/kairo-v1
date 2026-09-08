@@ -9,13 +9,14 @@ import math
 import sys
 import urllib.request
 from collections import defaultdict
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,7 @@ for import_root in (ROOT, BACKEND_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
+from app.domain.enums import OptionRight  # noqa: E402
 from engine.data.corpus_qualifier import (  # noqa: E402
     CorpusQualificationManifest,
     QualificationStatus,
@@ -82,20 +84,55 @@ class ArtifactReference(BaseModel):
         return self
 
 
-class EmpiricalSignal(BaseModel):
+class IntraTradeQuote(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    timestamp: datetime
+    bid: Decimal = Field(ge=0)
+    ask: Decimal = Field(ge=0)
+
+    @model_validator(mode="after")
+    def causal_quote(self) -> "IntraTradeQuote":
+        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("intra-trade quote timestamp must be timezone-aware")
+        if self.ask < self.bid:
+            raise ValueError("intra-trade option quote market cannot be crossed")
+        return self
+
+
+class EmpiricalSignal(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True, serialize_by_alias=True)
+
     signal_id: str = Field(min_length=1)
-    symbol: str = Field(pattern=r"^(TQQQ|SQQQ)$")
+    contract_instrument_id: UUID = Field(
+        validation_alias=AliasChoices("contract_instrument_id", "contract_id"),
+        serialization_alias="contract_id",
+    )
+    symbol: str = Field(
+        pattern=r"^(TQQQ|SQQQ)$",
+        validation_alias=AliasChoices("symbol", "underlying"),
+        serialization_alias="underlying",
+    )
+    option_right: OptionRight = Field(
+        validation_alias=AliasChoices("option_right", "right"),
+        serialization_alias="right",
+    )
     session: date
-    signal_at: datetime
-    exit_at: datetime
+    signal_at: datetime = Field(
+        validation_alias=AliasChoices("signal_at", "entry_timestamp"),
+        serialization_alias="entry_timestamp",
+    )
+    exit_at: datetime = Field(
+        validation_alias=AliasChoices("exit_at", "exit_timestamp"),
+        serialization_alias="exit_timestamp",
+    )
     entry_bid: Decimal = Field(gt=0)
     entry_ask: Decimal = Field(gt=0)
     exit_bid: Decimal = Field(gt=0)
     exit_ask: Decimal = Field(gt=0)
     contract_multiplier: Decimal = Field(default=Decimal("100"), gt=0)
     exit_reason: StrategySignalReason
+    intra_trade_path: tuple[IntraTradeQuote, ...]
 
     @model_validator(mode="after")
     def valid_observation(self) -> "EmpiricalSignal":
@@ -107,6 +144,25 @@ class EmpiricalSignal(BaseModel):
             raise ValueError("exit must follow the signal")
         if self.entry_ask < self.entry_bid or self.exit_ask < self.exit_bid:
             raise ValueError("option quote markets cannot be crossed")
+        if not self.intra_trade_path:
+            raise ValueError("empirical signal requires a complete intra-trade quote path")
+        timestamps = [item.timestamp for item in self.intra_trade_path]
+        if timestamps != sorted(set(timestamps)):
+            raise ValueError("intra-trade quote path must be unique and chronological")
+        if any(
+            current - previous != timedelta(minutes=1)
+            for previous, current in zip(timestamps, timestamps[1:])
+        ):
+            raise ValueError("intra-trade quote path must contain every causal minute")
+        if timestamps[0] != self.signal_at or timestamps[-1] != self.exit_at:
+            raise ValueError("intra-trade quote path endpoints do not match execution")
+        if (
+            self.intra_trade_path[0].bid != self.entry_bid
+            or self.intra_trade_path[0].ask != self.entry_ask
+            or self.intra_trade_path[-1].bid != self.exit_bid
+            or self.intra_trade_path[-1].ask != self.exit_ask
+        ):
+            raise ValueError("intra-trade quote path prices do not match execution")
         if not Q1_START <= self.session <= Q1_END:
             raise ValueError("signal session is outside certified Q1")
         if self.exit_reason not in {
@@ -139,7 +195,9 @@ class Q1CapitalMatrixEvidence(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: str = Field(pattern=r"^KAIRO-Q1-CAPITAL-EVIDENCE-v1$")
+    evidence_payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     qualification_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    qualification_manifest_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     normalized_dataset_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     strategy_id: str = Field(pattern=r"^EMA-CROSS-001$")
     strategy_version: str = Field(pattern=r"^1\.0\.0$")
@@ -161,6 +219,18 @@ class Q1CapitalMatrixEvidence(BaseModel):
         if ordering != sorted(ordering):
             raise ValueError("empirical signals must be deterministically ordered")
         return self
+
+    def canonical_payload_bytes(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json", exclude={"evidence_payload_sha256"}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def verify_self_seal(self) -> None:
+        digest = hashlib.sha256(self.canonical_payload_bytes()).hexdigest()
+        if digest != self.evidence_payload_sha256:
+            raise ValueError("capital evidence self-seal is invalid")
 
 
 class FrictionPolicy(BaseModel):
@@ -314,6 +384,42 @@ def verified_bytes(uri: str, expected_sha256: str, expected_size: int | None = N
     return content
 
 
+def verify_artifact_reference(artifact: ArtifactReference) -> None:
+    local = _local_path(artifact.uri)
+    if local is None:
+        verified_bytes(artifact.uri, artifact.content_sha256, artifact.byte_size)
+        return
+    if not local.is_file():
+        raise FileNotFoundError(f"required evidence does not exist: {artifact.uri}")
+    digest = hashlib.sha256()
+    size = 0
+    with local.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    if size != artifact.byte_size:
+        raise ValueError(f"evidence byte-size mismatch: {artifact.uri}")
+    if digest.hexdigest() != artifact.content_sha256:
+        raise ValueError(f"evidence SHA-256 mismatch: {artifact.uri}")
+
+
+def verify_qualification_manifest_identity(
+    manifest: CorpusQualificationManifest,
+) -> None:
+    body = manifest.model_dump(
+        mode="json",
+        exclude={"qualification_manifest_id", "qualification_manifest_sha256"},
+    )
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if digest != manifest.qualification_manifest_sha256:
+        raise ValueError("qualification manifest internal SHA-256 is invalid")
+    expected_id = uuid5(NAMESPACE_URL, f"kairo:corpus-qualification:{digest}")
+    if expected_id != manifest.qualification_manifest_id:
+        raise ValueError("qualification manifest deterministic identity is invalid")
+
+
 def load_certified_evidence(
     *,
     manifest_uri: str,
@@ -323,6 +429,7 @@ def load_certified_evidence(
 ) -> tuple[CorpusQualificationManifest, Q1CapitalMatrixEvidence]:
     manifest_content = verified_bytes(manifest_uri, manifest_sha256)
     manifest = CorpusQualificationManifest.model_validate_json(manifest_content)
+    verify_qualification_manifest_identity(manifest)
     window = manifest.pilot_window
     if (window.start_session, window.end_session) != (Q1_START, Q1_END):
         raise ValueError("qualification manifest is not the certified Q1 2024 window")
@@ -331,8 +438,11 @@ def load_certified_evidence(
 
     evidence_content = verified_bytes(evidence_uri, evidence_sha256)
     evidence = Q1CapitalMatrixEvidence.model_validate_json(evidence_content)
-    if evidence.qualification_manifest_sha256 != manifest_sha256:
-        raise ValueError("empirical evidence is not bound to the supplied qualification manifest")
+    evidence.verify_self_seal()
+    if evidence.qualification_manifest_content_sha256 != manifest_sha256:
+        raise ValueError("empirical evidence is not bound to the supplied manifest artifact")
+    if evidence.qualification_manifest_sha256 != manifest.qualification_manifest_sha256:
+        raise ValueError("empirical evidence is not bound to the qualification identity")
     if (
         evidence.normalized_dataset_manifest_sha256
         != manifest.normalized_dataset_manifest_sha256
@@ -341,7 +451,7 @@ def load_certified_evidence(
     if len(evidence.signals) != manifest.metrics.strategy_signal_count:
         raise ValueError("empirical signal population does not match qualification manifest")
     for artifact in evidence.artifacts:
-        verified_bytes(artifact.uri, artifact.content_sha256, artifact.byte_size)
+        verify_artifact_reference(artifact)
     return manifest, evidence
 
 

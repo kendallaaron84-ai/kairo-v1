@@ -5,7 +5,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 
@@ -43,18 +43,30 @@ def signal(
     session: date = date(2024, 1, 2),
 ):
     at = datetime.combine(session, datetime.min.time(), UTC) + timedelta(hours=15, minutes=index)
+    exit_at = at + timedelta(minutes=5)
+    path = tuple(
+        runner.IntraTradeQuote(
+            timestamp=at + timedelta(minutes=minute),
+            bid=Decimal(exit_bid if minute == 5 else entry_bid),
+            ask=Decimal(exit_ask if minute == 5 else entry_ask),
+        )
+        for minute in range(6)
+    )
     return runner.EmpiricalSignal(
         signal_id=f"signal-{index:03d}",
+        contract_instrument_id=uuid5(NAMESPACE_URL, f"signal-contract:{index}"),
         symbol="TQQQ" if index % 2 == 0 else "SQQQ",
+        option_right="PUT",
         session=session,
         signal_at=at,
-        exit_at=at + timedelta(minutes=5),
+        exit_at=exit_at,
         entry_bid=Decimal(entry_bid),
         entry_ask=Decimal(entry_ask),
         exit_bid=Decimal(exit_bid),
         exit_ask=Decimal(exit_ask),
         contract_multiplier=Decimal("100"),
         exit_reason="TAKE_PROFIT" if Decimal(exit_bid) > Decimal(entry_ask) else "STOP_LOSS",
+        intra_trade_path=path,
     )
 
 
@@ -66,9 +78,9 @@ def qualification(signal_count: int, verdict=QualificationStatus.PASS):
         resolved_contracts_count=signal_count,
         rejected_contracts_count=0,
     )
-    return CorpusQualificationManifest(
+    draft = CorpusQualificationManifest(
         qualification_manifest_id=uuid4(),
-        qualification_manifest_sha256="a" * 64,
+        qualification_manifest_sha256="0" * 64,
         qualification_policy_version="CORPUS-QUALIFICATION-v1",
         provider_code="THETA_DATA",
         pilot_window=PilotWindow(
@@ -96,6 +108,19 @@ def qualification(signal_count: int, verdict=QualificationStatus.PASS):
         raw_artifacts_manifest_sha256="b" * 64,
         normalized_dataset_manifest_sha256="c" * 64,
     )
+    body = draft.model_dump(
+        mode="json",
+        exclude={"qualification_manifest_id", "qualification_manifest_sha256"},
+    )
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return draft.model_copy(update={
+        "qualification_manifest_id": uuid5(
+            NAMESPACE_URL, f"kairo:corpus-qualification:{digest}"
+        ),
+        "qualification_manifest_sha256": digest,
+    })
 
 
 def sealed_fixture(tmp_path, runner, signals, *, verdict=QualificationStatus.PASS):
@@ -109,7 +134,9 @@ def sealed_fixture(tmp_path, runner, signals, *, verdict=QualificationStatus.PAS
     manifest_hash = hashlib.sha256(manifest_content).hexdigest()
     evidence = runner.Q1CapitalMatrixEvidence(
         schema_version="KAIRO-Q1-CAPITAL-EVIDENCE-v1",
-        qualification_manifest_sha256=manifest_hash,
+        evidence_payload_sha256="0" * 64,
+        qualification_manifest_sha256=manifest.qualification_manifest_sha256,
+        qualification_manifest_content_sha256=manifest_hash,
         normalized_dataset_manifest_sha256="c" * 64,
         strategy_id="EMA-CROSS-001",
         strategy_version="1.0.0",
@@ -122,6 +149,11 @@ def sealed_fixture(tmp_path, runner, signals, *, verdict=QualificationStatus.PAS
         ),),
         signals=signals,
     )
+    evidence = evidence.model_copy(update={
+        "evidence_payload_sha256": hashlib.sha256(
+            evidence.canonical_payload_bytes()
+        ).hexdigest()
+    })
     evidence_content = json.dumps(
         evidence.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     ).encode()
@@ -153,7 +185,9 @@ def test_capital_parameterization_and_affordability_drop_logic():
     )
     evidence = runner.Q1CapitalMatrixEvidence(
         schema_version="KAIRO-Q1-CAPITAL-EVIDENCE-v1",
+        evidence_payload_sha256="0" * 64,
         qualification_manifest_sha256="a" * 64,
+        qualification_manifest_content_sha256="a" * 64,
         normalized_dataset_manifest_sha256="c" * 64,
         strategy_id="EMA-CROSS-001",
         strategy_version="1.0.0",
@@ -243,7 +277,9 @@ def test_deterministic_summary_and_output_schema():
     evidence_signals = (signal(runner, 0), signal(runner, 1))
     fixture = runner.Q1CapitalMatrixEvidence(
         schema_version="KAIRO-Q1-CAPITAL-EVIDENCE-v1",
+        evidence_payload_sha256="0" * 64,
         qualification_manifest_sha256="a" * 64,
+        qualification_manifest_content_sha256="a" * 64,
         normalized_dataset_manifest_sha256="c" * 64,
         strategy_id="EMA-CROSS-001",
         strategy_version="1.0.0",
@@ -302,7 +338,20 @@ def test_non_q1_manifest_window_fails_closed_before_replay(tmp_path):
     invalid_window = manifest.pilot_window.model_copy(
         update={"start_session": date(2024, 1, 3)}
     )
-    content = manifest.model_copy(update={"pilot_window": invalid_window}).canonical_bytes()
+    changed = manifest.model_copy(update={"pilot_window": invalid_window})
+    body = changed.model_dump(
+        mode="json",
+        exclude={"qualification_manifest_id", "qualification_manifest_sha256"},
+    )
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    content = changed.model_copy(update={
+        "qualification_manifest_id": uuid5(
+            NAMESPACE_URL, f"kairo:corpus-qualification:{digest}"
+        ),
+        "qualification_manifest_sha256": digest,
+    }).canonical_bytes()
     manifest_path.write_bytes(content)
     fixture["manifest_sha256"] = hashlib.sha256(content).hexdigest()
     with pytest.raises(ValueError, match="certified Q1"):
@@ -332,12 +381,22 @@ def test_empirical_exit_must_satisfy_frozen_price_threshold():
     runner = load_runner()
     with pytest.raises(ValueError, match="take-profit"):
         runner.EmpiricalSignal(
-            signal_id="bad-exit", symbol="TQQQ", session=date(2024, 1, 2),
+            signal_id="bad-exit",
+            contract_instrument_id=uuid5(NAMESPACE_URL, "signal-contract:bad-exit"),
+            symbol="TQQQ", option_right="PUT", session=date(2024, 1, 2),
             signal_at=datetime(2024, 1, 2, 15, 0, tzinfo=UTC),
             exit_at=datetime(2024, 1, 2, 15, 5, tzinfo=UTC),
             entry_bid=Decimal("0.19"), entry_ask=Decimal("0.20"),
             exit_bid=Decimal("0.21"), exit_ask=Decimal("0.22"),
             exit_reason="TAKE_PROFIT",
+            intra_trade_path=tuple(
+                runner.IntraTradeQuote(
+                    timestamp=datetime(2024, 1, 2, 15, minute, tzinfo=UTC),
+                    bid=Decimal("0.21" if minute == 5 else "0.19"),
+                    ask=Decimal("0.22" if minute == 5 else "0.20"),
+                )
+                for minute in range(6)
+            ),
         )
 
 
