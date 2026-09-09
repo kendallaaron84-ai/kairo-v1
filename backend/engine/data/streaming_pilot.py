@@ -199,6 +199,109 @@ def _read_frames(path: Path) -> Iterator[bytes]:
             yield frame
 
 
+@dataclass(frozen=True)
+class VerifiedThetaAggregate:
+    """Identity and population established by one complete sequential scan."""
+
+    artifact: StagedArtifact
+    section_count: int
+    frame_count: int
+
+
+def scan_decoded_aggregate(
+    path: str | Path,
+    *,
+    mime_type: str = ThetaDecodedArtifactSerializer.MIME_TYPE,
+    expected_sha256: str | None = None,
+    expected_byte_size: int | None = None,
+    section_sinks: Sequence[Callable[[DecodedThetaRecordSection], None]] = (),
+    progress: Callable[[int, int], None] | None = None,
+) -> VerifiedThetaAggregate:
+    """Verify and fan out one aggregate using exactly one sequential byte pass.
+
+    Sinks are deliberately synchronous.  Callers that persist sink output must keep
+    it transactional until this function returns: the aggregate identity, header
+    population, and trailing framing are not authoritative before EOF.
+    """
+    resolved = Path(path).resolve()
+    total_size = resolved.stat().st_size
+    if expected_byte_size is not None and total_size != expected_byte_size:
+        raise ValueError("staged Theta aggregate byte size mismatch")
+    digest = hashlib.sha256()
+    bytes_read = 0
+    frame_count = 0
+    section_count = 0
+    expected_sections: int | None = None
+    header: Mapping[str, Any] | None = None
+    prior: bytes | None = None
+    reader = ThetaDecodedArtifactReader()
+    magic = ThetaDecodedArtifactSerializer.MAGIC
+
+    def read_exact(stream: BinaryIO, size: int, label: str) -> bytes:
+        nonlocal bytes_read
+        value = stream.read(size)
+        if len(value) != size:
+            raise ValueError(f"Theta decoded aggregate {label} is truncated")
+        digest.update(value)
+        bytes_read += len(value)
+        return value
+
+    with resolved.open("rb") as stream:
+        if read_exact(stream, len(magic), "magic") != magic:
+            raise ValueError("Theta decoded staging artifact framing mismatch")
+        while bytes_read < total_size:
+            prefix = read_exact(stream, 8, "frame prefix")
+            length = struct.unpack(">Q", prefix)[0]
+            if length == 0 or length > total_size - bytes_read:
+                raise ValueError("Theta decoded aggregate frame is truncated or empty")
+            frame = read_exact(stream, length, "frame")
+            frame_count += 1
+            try:
+                decoded = json.loads(frame)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("Theta decoded aggregate contains invalid JSON") from error
+            if canonical_json_bytes(decoded) != frame:
+                raise ValueError("Theta decoded staging frame is not canonical")
+            if frame_count == 1:
+                if not isinstance(decoded, dict):
+                    raise ValueError("Theta decoded aggregate header is invalid")
+                expected_sections = decoded.get("section_count")
+                if not isinstance(expected_sections, int) or expected_sections < 0:
+                    raise ValueError("Theta decoded staged artifact section count is invalid")
+                header = decoded
+            else:
+                if prior is not None and frame < prior:
+                    raise ValueError("Theta decoded staged sections are not canonically ordered")
+                prior = frame
+                section = reader._section(decoded)
+                for sink in section_sinks:
+                    sink(section)
+                section_count += 1
+            if progress is not None:
+                progress(bytes_read, frame_count)
+
+    if frame_count == 0 or header is None or expected_sections is None:
+        raise ValueError("Theta decoded staged artifact header is absent")
+    if bytes_read != total_size:
+        raise ValueError("Theta decoded aggregate framing does not consume the file")
+    if section_count != expected_sections:
+        raise ValueError("Theta decoded staged artifact section count mismatch")
+    reader._header(header, section_count)
+    actual_sha256 = digest.hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
+        raise ValueError("staged Theta aggregate failed content verification")
+    return VerifiedThetaAggregate(
+        artifact=StagedArtifact(
+            path=resolved,
+            content_sha256=actual_sha256,
+            byte_size=bytes_read,
+            mime_type=mime_type,
+        ),
+        section_count=section_count,
+        frame_count=frame_count,
+    )
+
+
 def iter_decoded_sections(artifact: StagedArtifact) -> Iterator[DecodedThetaRecordSection]:
     """Decode and validate one section frame at a time from a staged artifact."""
     digest, size = file_identity(artifact.path)
@@ -244,6 +347,36 @@ class ThetaDecodedArtifactExternalMerger:
         if not components:
             raise ValueError(f"no provider artifacts were acquired for {symbol}")
         ordered = sorted(components, key=lambda item: item.content_sha256)
+        output = Path(output_path)
+        if output.exists() and output.is_file() and output.stat().st_size > 0:
+            try:
+                verified = scan_decoded_aggregate(output)
+                staged = verified.artifact
+                print(
+                    canonical_json_bytes({
+                        "severity": "INFO",
+                        "event": "AGGREGATE_REUSED",
+                        "symbol": symbol,
+                        "request_kind": request_kind,
+                        "path": str(output),
+                        "byte_size": staged.byte_size,
+                        "content_sha256": staged.content_sha256,
+                        "section_count": verified.section_count,
+                    }).decode("utf-8"),
+                    flush=True,
+                )
+                print(
+                    f"[AGGREGATE_REUSED] Reusing existing valid aggregate: {output.name} "
+                    f"({staged.byte_size} bytes, sha256={staged.content_sha256}, "
+                    f"sections={verified.section_count})",
+                    flush=True,
+                )
+                return staged
+            except Exception as ex:
+                print(
+                    f"[AGGREGATE_REUSE_FAILED] Could not reuse {output.name}: {ex}; proceeding with external merge",
+                    flush=True,
+                )
         wire_hashes: set[str] = set()
         section_count = 0
         sources: list[tuple[Path, bool]] = []
@@ -463,6 +596,15 @@ class OptionDiscoverySpool(AbstractContextManager["OptionDiscoverySpool"]):
     def commit(self) -> None:
         self.connection.commit()
 
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def row_counts(self) -> dict[str, int]:
+        return {
+            table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("valid_discoveries", "rejected_discoveries", "accepted")
+        }
+
     def enrollment_batches(self, batch_size: int = 500) -> Iterator[list[Mapping[str, Any]]]:
         cursor = self.connection.execute(
             "SELECT raw FROM valid_discoveries ORDER BY expiration, CAST(strike AS REAL), right"
@@ -506,6 +648,14 @@ class OptionDiscoverySpool(AbstractContextManager["OptionDiscoverySpool"]):
                 if present:
                     keys.add(key)
         return frozenset(keys)
+
+    def accepted_keys(self) -> Iterator[tuple[date, Decimal, OptionRight]]:
+        rows = self.connection.execute(
+            "SELECT expiration, strike, right FROM accepted "
+            "ORDER BY expiration, CAST(strike AS REAL), right"
+        )
+        for expiration, strike, right in rows:
+            yield date.fromisoformat(expiration), Decimal(strike), OptionRight(right)
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.connection.close()
@@ -570,6 +720,12 @@ class SessionLiquidityIndex(AbstractContextManager["SessionLiquidityIndex"]):
 
     def commit(self) -> None:
         self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def row_count(self) -> int:
+        return int(self.connection.execute("SELECT COUNT(*) FROM oi").fetchone()[0])
 
     def sections_for(
         self,

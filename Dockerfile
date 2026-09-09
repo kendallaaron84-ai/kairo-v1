@@ -9,6 +9,7 @@ WORKDIR /app
 COPY backend/pyproject.toml ./backend/pyproject.toml
 COPY backend/app ./backend/app
 COPY backend/engine ./backend/engine
+COPY backend/kairo ./backend/kairo
 COPY backend/alembic ./backend/alembic
 COPY backend/alembic.ini ./backend/alembic.ini
 COPY scripts ./scripts

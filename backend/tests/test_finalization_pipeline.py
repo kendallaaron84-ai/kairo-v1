@@ -1,0 +1,256 @@
+import hashlib
+from dataclasses import replace
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from engine.data.streaming_pilot import (
+    OptionDiscoverySpool,
+    SessionLiquidityIndex,
+    scan_decoded_aggregate,
+)
+from engine.data.theta_v3 import DecodedThetaSection, ThetaDecodedArtifactSerializer
+from kairo.pipeline.finalization_stages import Progress, SOURCE_OBJECTS, run_stage_1
+from kairo.pipeline.finalize import receipt_chain
+from kairo.pipeline.finalization_state import (
+    ObjectIdentity,
+    Receipt,
+    load_receipt,
+    receipt_path,
+)
+
+
+class MemoryStore:
+    def __init__(self):
+        self.values = {}
+        self.identities = {}
+        self.generation = 0
+
+    def add_source(self, name, content):
+        self.generation += 1
+        self.values[name] = content
+        self.identities[name] = ObjectIdentity(
+            uri=f"gs://kairo-market-artifacts-507516/{name}",
+            generation=str(self.generation),
+            metageneration="1",
+            byte_count=len(content),
+            sha256=None,
+        )
+
+    def stat(self, object_name):
+        return self.identities.get(object_name)
+
+    def download(self, object_name, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.values[object_name])
+        return self.identities[object_name]
+
+    def upload_immutable(self, object_name, source, *, content_type, sha256, byte_count):
+        content = source.read_bytes()
+        assert hashlib.sha256(content).hexdigest() == sha256
+        assert len(content) == byte_count
+        existing = self.identities.get(object_name)
+        if existing:
+            if self.values[object_name] != content:
+                raise ValueError("conflict")
+            return existing
+        self.generation += 1
+        identity = ObjectIdentity(
+            uri=f"gs://kairo-market-artifacts-507516/{object_name}",
+            generation=str(self.generation),
+            metageneration="1",
+            byte_count=byte_count,
+            sha256=sha256,
+        )
+        self.values[object_name] = content
+        self.identities[object_name] = identity
+        return identity
+
+    def read_bytes(self, object_name):
+        return self.values[object_name]
+
+    def seal_bytes(self, object_name, content, *, content_type):
+        existing = self.identities.get(object_name)
+        if existing:
+            if self.values[object_name] != content:
+                raise ValueError("conflict")
+            return existing
+        self.generation += 1
+        identity = ObjectIdentity(
+            uri=f"gs://kairo-market-artifacts-507516/{object_name}",
+            generation=str(self.generation),
+            metageneration="1",
+            byte_count=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        self.values[object_name] = content
+        self.identities[object_name] = identity
+        return identity
+
+
+def aggregate(symbol="TQQQ"):
+    observed = datetime(2024, 1, 2, 15, 31, tzinfo=timezone.utc)
+    return ThetaDecodedArtifactSerializer().serialize(
+        (
+            DecodedThetaSection(
+                endpoint="option_history_quote",
+                parameters={"symbol": symbol, "expiration": date(2024, 1, 5)},
+                dataframe=[{
+                    "strike": Decimal("50"),
+                    "right": "CALL",
+                    "timestamp": observed,
+                    "bid": Decimal("1"),
+                    "ask": Decimal("1.1"),
+                    "bid_size": 2,
+                    "ask_size": 3,
+                }],
+            ),
+            DecodedThetaSection(
+                endpoint="option_history_open_interest",
+                parameters={"date": date(2024, 1, 2), "expiration": date(2024, 1, 5)},
+                dataframe=[{
+                    "strike": Decimal("50"),
+                    "right": "CALL",
+                    "timestamp": observed,
+                    "open_interest": 9,
+                }],
+            ),
+        ),
+        acquisition_request={"symbol": symbol},
+    )
+
+
+def test_single_pass_scanner_matches_existing_index_semantics(tmp_path):
+    content = aggregate()
+    source = tmp_path / "aggregate.bin"
+    source.write_bytes(content)
+    baseline_discovery = tmp_path / "baseline-discovery.sqlite3"
+    baseline_liquidity = tmp_path / "baseline-liquidity.sqlite3"
+    fused_discovery = tmp_path / "fused-discovery.sqlite3"
+    fused_liquidity = tmp_path / "fused-liquidity.sqlite3"
+
+    from engine.data.streaming_pilot import iter_decoded_sections, staged_artifact
+
+    with OptionDiscoverySpool(baseline_discovery, "TQQQ") as discovery, SessionLiquidityIndex(
+        baseline_liquidity
+    ) as liquidity:
+        for section in iter_decoded_sections(staged_artifact(source, "application/octet-stream")):
+            discovery.ingest_sections((section,), commit=False)
+            liquidity.ingest_sections((section,), commit=False)
+        discovery.commit()
+        liquidity.commit()
+
+    with OptionDiscoverySpool(fused_discovery, "TQQQ") as discovery, SessionLiquidityIndex(
+        fused_liquidity
+    ) as liquidity:
+        result = scan_decoded_aggregate(
+            source,
+            section_sinks=(
+                lambda section: discovery.ingest_sections((section,), commit=False),
+                lambda section: liquidity.ingest_sections((section,), commit=False),
+            ),
+        )
+        discovery.commit()
+        liquidity.commit()
+        assert discovery.row_counts() == {
+            "valid_discoveries": 1,
+            "rejected_discoveries": 0,
+            "accepted": 0,
+        }
+        assert liquidity.row_count() == 1
+
+    assert result.artifact.content_sha256 == hashlib.sha256(content).hexdigest()
+    assert result.artifact.byte_size == len(content)
+    for baseline, fused in (
+        (baseline_discovery, fused_discovery),
+        (baseline_liquidity, fused_liquidity),
+    ):
+        # SQLite page layout is deterministic for identical ordered statements.
+        assert baseline.read_bytes() == fused.read_bytes()
+
+
+def test_stage_1_seals_generation_bound_indexes_and_receipt(tmp_path):
+    store = MemoryStore()
+    paths = {}
+    for symbol in ("TQQQ", "SQQQ"):
+        content = aggregate(symbol)
+        store.add_source(SOURCE_OBJECTS[symbol], content)
+        path = tmp_path / f"{symbol}.bin"
+        path.write_bytes(content)
+        paths[symbol] = path
+    receipt = run_stage_1(store, tmp_path, Progress(lambda _value: None), source_paths=paths)
+    restored = load_receipt(store, 1)
+    assert restored == receipt
+    assert receipt.facts["aggregates"]["TQQQ"]["source_sha256"] == hashlib.sha256(
+        aggregate("TQQQ")
+    ).hexdigest()
+    assert len(receipt.outputs) == 4
+    assert all(item["identity"]["generation"] for item in receipt.inputs)
+    assert all(item["identity"]["sha256"] for item in receipt.outputs)
+
+
+def test_stage_1_verification_failure_publishes_nothing(tmp_path):
+    store = MemoryStore()
+    paths = {}
+    for symbol in ("TQQQ", "SQQQ"):
+        content = aggregate(symbol)
+        store.add_source(SOURCE_OBJECTS[symbol], content)
+        path = tmp_path / f"{symbol}.bin"
+        path.write_bytes(content if symbol == "TQQQ" else content[:-1])
+        paths[symbol] = path
+    with pytest.raises(ValueError):
+        run_stage_1(store, tmp_path, Progress(lambda _value: None), source_paths=paths)
+    assert store.stat(receipt_path(1)) is None
+    assert not any("/indexes/" in name for name in store.values)
+
+
+def test_receipt_parser_rejects_noncanonical_and_stale_contract():
+    receipt = Receipt(
+        receipt_version="KAIRO-Q1-FINALIZATION-RECEIPT-v1",
+        dataset="q1-2024",
+        stage=1,
+        stage_version="v1",
+        predecessor_sha256=None,
+        inputs=(),
+        outputs=(),
+        facts={},
+    )
+    assert Receipt.parse(receipt.canonical_bytes()) == receipt
+    with pytest.raises(ValueError, match="not canonical"):
+        Receipt.parse(receipt.canonical_bytes() + b"\n")
+    with pytest.raises(ValueError, match="contract mismatch"):
+        Receipt.parse(replace(receipt, dataset="other").canonical_bytes())
+
+
+def test_restart_chain_fails_closed_on_gap_and_source_generation_drift(tmp_path):
+    gap_store = MemoryStore()
+    stage_2 = Receipt(
+        receipt_version="KAIRO-Q1-FINALIZATION-RECEIPT-v1",
+        dataset="q1-2024",
+        stage=2,
+        stage_version="v1",
+        predecessor_sha256="a" * 64,
+        inputs=(),
+        outputs=(),
+        facts={},
+    )
+    gap_store.seal_bytes(receipt_path(2), stage_2.canonical_bytes(), content_type="application/json")
+    with pytest.raises(ValueError, match="stage gap"):
+        receipt_chain(gap_store)
+
+    store = MemoryStore()
+    paths = {}
+    for symbol in ("TQQQ", "SQQQ"):
+        content = aggregate(symbol)
+        store.add_source(SOURCE_OBJECTS[symbol], content)
+        paths[symbol] = tmp_path / f"{symbol}.bin"
+        paths[symbol].write_bytes(content)
+    run_stage_1(store, tmp_path, Progress(lambda _value: None), source_paths=paths)
+    source = store.identities[SOURCE_OBJECTS["TQQQ"]]
+    store.identities[SOURCE_OBJECTS["TQQQ"]] = replace(
+        source, generation=str(int(source.generation) + 100)
+    )
+    with pytest.raises(ValueError, match="identity contradiction"):
+        receipt_chain(store)
