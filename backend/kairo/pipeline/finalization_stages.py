@@ -28,7 +28,15 @@ from app.infrastructure.storage.gcs_checkpoint import (
     CheckpointMetadata,
     GCSCheckpointStore,
 )
-from engine.data.corpus_qualifier import CorpusQualificationEngine, PilotDecisionPoint
+from engine.data.corpus_qualifier import (
+    CorpusQualificationEngine,
+    CorpusQualificationManifest,
+    PilotDecisionPoint,
+)
+from engine.data.corpus_qualifier_v21 import (
+    CorpusQualificationV21Manifest,
+    qualify_staged_v21,
+)
 from engine.data.option_enrollment import (
     CanonicalResolutionAccounting,
     HistoricalOptionEnrollmentGate,
@@ -928,28 +936,38 @@ def _restore_plan(store: DurableObjectStore, receipt: Receipt, workspace: Path) 
     return plan
 
 
-def _authority_exists(session: Session, plan: dict[str, Any]) -> bool:
+def _canonical_payload(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _authority_exists(
+    session: Session, plan: dict[str, Any], qualification_v21_bytes: bytes
+) -> bool:
     dataset = session.scalar(select(HistoricalMarketDataset).where(
         HistoricalMarketDataset.dataset_manifest_sha256
         == plan["expected_dataset_manifest_sha256"]
     ))
-    expected_bytes = json.dumps(
-        plan["expected_qualification"],
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    qualification_hash = hashlib.sha256(expected_bytes).hexdigest()
-    artifact = session.scalar(select(HistoricalMarketArtifact).where(
-        HistoricalMarketArtifact.content_sha256 == qualification_hash
-    ))
-    if (dataset is None) != (artifact is None):
-        raise ValueError("partial canonical authority contradicts Stage 2 plan")
-    if artifact is not None and (
-        artifact.artifact_role != "NORMALIZED_RESEARCH_STREAM"
-        or artifact.byte_size != len(expected_bytes)
-    ):
-        raise ValueError("qualification authority provenance is invalid")
+    expected_v1_bytes = _canonical_payload(plan["expected_qualification"])
+    expected = (expected_v1_bytes, qualification_v21_bytes)
+    artifacts = [
+        session.scalar(select(HistoricalMarketArtifact).where(
+            HistoricalMarketArtifact.content_sha256 == hashlib.sha256(content).hexdigest()
+        ))
+        for content in expected
+    ]
+    presences = (dataset is not None, *(artifact is not None for artifact in artifacts))
+    if any(presences) and not all(presences):
+        raise ValueError("partial canonical authority contradicts v1/v2.1 lineage")
+    for artifact, content in zip(artifacts, expected, strict=True):
+        if artifact is not None and (
+            artifact.artifact_role != "NORMALIZED_RESEARCH_STREAM"
+            or artifact.byte_size != len(content)
+            or artifact.mime_type
+            != "application/vnd.kairo.corpus-qualification+json"
+        ):
+            raise ValueError("qualification authority provenance is invalid")
     return dataset is not None
 
 
@@ -1017,12 +1035,31 @@ def run_stage_3(
                 "last_bar_completed_at": datetime.fromisoformat(stream["last_bar_completed_at"]),
             })
 
-        expected_qualification = plan["expected_qualification"]
-        expected_manifest_bytes = json.dumps(
-            expected_qualification, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        expected_v1 = CorpusQualificationManifest.model_validate(
+            plan["expected_qualification"]
+        )
+        expected_v1_bytes = expected_v1.canonical_bytes()
+        option_artifacts = {
+            item["symbol"]: item["normalized_artifact"]
+            for item in staged_streams
+            if item["stream_role"] is StreamRole.OPTION_CHAIN_QUOTES
+        }
+        plan_descriptor = _stage_output(predecessor, artifact_kind="stage_2_plan")
+        expected_v21 = qualify_staged_v21(
+            option_snapshot_artifacts=option_artifacts,
+            decision_points=tuple(
+                PilotDecisionPoint.model_validate(item) for item in plan["decisions"]
+            ),
+            v1_manifest=expected_v1,
+            stage_2_receipt_sha256=predecessor.sha256,
+            stage_2_plan_identity=plan_descriptor["identity"],
+            calendar=calendar,
+        )
+        expected_v21_bytes = expected_v21.canonical_bytes()
         with Session(engine) as check_session:
-            already_committed = _authority_exists(check_session, plan)
+            already_committed = _authority_exists(
+                check_session, plan, expected_v21_bytes
+            )
 
         if not already_committed:
             with Session(engine, expire_on_commit=False) as session, session.begin():
@@ -1050,7 +1087,10 @@ def run_stage_3(
                 ingested_at = datetime.now(timezone.utc)
                 dataset = register_staged_dataset(
                     registry,
-                    dataset_name=f"THETA-PILOT-{AUTHORIZED_START.isoformat()}-{AUTHORIZED_END.isoformat()}",
+                    dataset_name=(
+                        f"THETA-PILOT-{AUTHORIZED_START.isoformat()}-"
+                        f"{AUTHORIZED_END.isoformat()}"
+                    ),
                     provider_name="THETA_DATA",
                     bar_interval_seconds=60,
                     source_timezone="America/New_York",
@@ -1090,11 +1130,23 @@ def run_stage_3(
                         resolution_accounting=combined,
                     ),
                 )
-                if manifest.canonical_bytes() != expected_manifest_bytes:
-                    raise ValueError("Stage 3 qualification diverges from Stage 2 equivalence gate")
-                CorpusQualificationEngine(
-                    session, calendar
-                ).persist_manifest(registry, manifest, created_at=ingested_at)
+                if manifest.canonical_bytes() != expected_v1_bytes:
+                    raise ValueError("Stage 3 v1 lineage diverges from Stage 2")
+                actual_v21 = qualify_staged_v21(
+                    option_snapshot_artifacts=option_artifacts,
+                    decision_points=tuple(
+                        PilotDecisionPoint.model_validate(item) for item in plan["decisions"]
+                    ),
+                    v1_manifest=manifest,
+                    stage_2_receipt_sha256=predecessor.sha256,
+                    stage_2_plan_identity=plan_descriptor["identity"],
+                    calendar=calendar,
+                )
+                if actual_v21.canonical_bytes() != expected_v21_bytes:
+                    raise ValueError("Stage 3 v2.1 qualification is not deterministic")
+                qualifier = CorpusQualificationEngine(session, calendar)
+                qualifier.persist_manifest(registry, manifest, created_at=ingested_at)
+                qualifier.persist_manifest(registry, actual_v21, created_at=ingested_at)
             progress.event(
                 "FINALIZATION_STAGE_PROGRESS",
                 3,
@@ -1103,7 +1155,7 @@ def run_stage_3(
             )
 
         with Session(engine) as check_session:
-            if not _authority_exists(check_session, plan):
+            if not _authority_exists(check_session, plan, expected_v21_bytes):
                 raise ValueError("canonical authority is absent after Stage 3 commit")
         receipt = Receipt(
             receipt_version=RECEIPT_VERSION,
@@ -1115,10 +1167,12 @@ def run_stage_3(
             outputs=(),
             facts={
                 "dataset_manifest_sha256": plan["expected_dataset_manifest_sha256"],
-                "qualification": expected_qualification,
+                "qualification": expected_v21.model_dump(mode="json"),
+                "qualification_v1_lineage": expected_v21.v1_lineage,
                 "qualification_manifest_bytes_sha256": hashlib.sha256(
-                    expected_manifest_bytes
+                    expected_v21_bytes
                 ).hexdigest(),
+                "strategy_001_diagnostic": expected_v21.strategy_001_diagnostic,
             },
         )
         seal_receipt(store, receipt)
@@ -1149,14 +1203,21 @@ def run_stage_4(
     progress.event("FINALIZATION_STAGE_STARTED", 4, started)
     plan = _restore_plan(store, stage_2, workspace)
     expected_qualification = predecessor.facts["qualification"]
-    if expected_qualification != plan["expected_qualification"]:
-        raise ValueError("Stage 3 qualification contradicts Stage 2")
-    manifest_bytes = json.dumps(
-        expected_qualification,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    CorpusQualificationV21Manifest.model_validate(expected_qualification)
+    if expected_qualification.get("qualification_policy_version") != "CORPUS-QUALIFICATION-v2.1":
+        raise ValueError("Stage 3 qualification policy is not v2.1")
+    v1 = CorpusQualificationManifest.model_validate(plan["expected_qualification"])
+    v1_lineage = expected_qualification.get("v1_lineage", {})
+    if (
+        v1_lineage.get("qualification_manifest_sha256")
+        != v1.qualification_manifest_sha256
+        or v1_lineage.get("canonical_bytes_sha256")
+        != hashlib.sha256(v1.canonical_bytes()).hexdigest()
+        or expected_qualification.get("stage_2_predecessor", {}).get("receipt_sha256")
+        != stage_2.sha256
+    ):
+        raise ValueError("Stage 3 v2.1 lineage contradicts Stage 2")
+    manifest_bytes = _canonical_payload(expected_qualification)
     if hashlib.sha256(manifest_bytes).hexdigest() != predecessor.facts[
         "qualification_manifest_bytes_sha256"
     ]:
@@ -1166,7 +1227,7 @@ def run_stage_4(
     accepted_spools: list[OptionDiscoverySpool] = []
     try:
         with Session(engine) as session:
-            if not _authority_exists(session, plan):
+            if not _authority_exists(session, plan, manifest_bytes):
                 raise ValueError("Stage 3 canonical database authority is absent")
             dataset = session.scalar(select(HistoricalMarketDataset).where(
                 HistoricalMarketDataset.dataset_manifest_sha256

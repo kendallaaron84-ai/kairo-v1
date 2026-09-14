@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,12 @@ from engine.data.streaming_pilot import (
     scan_decoded_aggregate,
 )
 from engine.data.theta_v3 import DecodedThetaSection, ThetaDecodedArtifactSerializer
-from kairo.pipeline.finalization_stages import Progress, SOURCE_OBJECTS, run_stage_1
+from kairo.pipeline.finalization_stages import (
+    Progress,
+    SOURCE_OBJECTS,
+    _authority_exists,
+    run_stage_1,
+)
 from kairo.pipeline.finalize import receipt_chain
 from kairo.pipeline.finalization_state import (
     ObjectIdentity,
@@ -88,6 +94,14 @@ class MemoryStore:
         self.values[object_name] = content
         self.identities[object_name] = identity
         return identity
+
+
+class ScalarSequence:
+    def __init__(self, *values):
+        self.values = iter(values)
+
+    def scalar(self, _statement):
+        return next(self.values)
 
 
 def aggregate(symbol="TQQQ"):
@@ -222,6 +236,30 @@ def test_receipt_parser_rejects_noncanonical_and_stale_contract():
         Receipt.parse(receipt.canonical_bytes() + b"\n")
     with pytest.raises(ValueError, match="contract mismatch"):
         Receipt.parse(replace(receipt, dataset="other").canonical_bytes())
+
+
+def test_authority_requires_dataset_and_both_qualification_lineages():
+    plan = {
+        "expected_dataset_manifest_sha256": "a" * 64,
+        "expected_qualification": {"qualification_policy_version": "v1"},
+    }
+    v1_bytes = b'{"qualification_policy_version":"v1"}'
+    v21_bytes = b'{"qualification_policy_version":"v2.1"}'
+    v1 = SimpleNamespace(
+        artifact_role="NORMALIZED_RESEARCH_STREAM",
+        byte_size=len(v1_bytes),
+        mime_type="application/vnd.kairo.corpus-qualification+json",
+    )
+    v21 = SimpleNamespace(
+        artifact_role="NORMALIZED_RESEARCH_STREAM",
+        byte_size=len(v21_bytes),
+        mime_type="application/vnd.kairo.corpus-qualification+json",
+    )
+
+    assert _authority_exists(ScalarSequence(None, None, None), plan, v21_bytes) is False
+    assert _authority_exists(ScalarSequence(object(), v1, v21), plan, v21_bytes) is True
+    with pytest.raises(ValueError, match="partial canonical authority"):
+        _authority_exists(ScalarSequence(object(), v1, None), plan, v21_bytes)
 
 
 def test_restart_chain_fails_closed_on_gap_and_source_generation_drift(tmp_path):

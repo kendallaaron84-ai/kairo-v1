@@ -45,3 +45,9 @@ next-env.d.ts
 data/
 !backend/engine/data/
 !backend/engine/data/streaming_pilot.py
+!backend/engine/data/corpus_qualifier_v21.py
+!backend/tests/engine/data/
+!backend/tests/engine/data/test_corpus_qualifier_v21.py
+!backend/tests/engine/data/test_q1_qualification_v21_regression.py
+!scripts/data/
+!scripts/data/generate_q1_qualification_v21.py
