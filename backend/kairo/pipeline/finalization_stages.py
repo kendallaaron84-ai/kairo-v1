@@ -1172,7 +1172,9 @@ def run_stage_3(
                 "qualification_manifest_bytes_sha256": hashlib.sha256(
                     expected_v21_bytes
                 ).hexdigest(),
-                "strategy_001_diagnostic": expected_v21.strategy_001_diagnostic,
+                "strategy_001_diagnostic": expected_v21.model_dump(mode="json")[
+                    "strategy_001_diagnostic"
+                ],
             },
         )
         seal_receipt(store, receipt)

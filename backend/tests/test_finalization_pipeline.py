@@ -1,12 +1,16 @@
 import hashlib
+import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
+from engine.data.corpus_qualifier import QualificationStatus
+from engine.data.corpus_qualifier_v21 import CorpusQualificationV21Manifest
 from engine.data.streaming_pilot import (
     OptionDiscoverySpool,
     SessionLiquidityIndex,
@@ -21,10 +25,14 @@ from kairo.pipeline.finalization_stages import (
 )
 from kairo.pipeline.finalize import receipt_chain
 from kairo.pipeline.finalization_state import (
+    AUTHORITY_STAGE_VERSION,
+    DATASET,
     ObjectIdentity,
+    RECEIPT_VERSION,
     Receipt,
     load_receipt,
     receipt_path,
+    seal_receipt,
 )
 
 
@@ -260,6 +268,76 @@ def test_authority_requires_dataset_and_both_qualification_lineages():
     assert _authority_exists(ScalarSequence(object(), v1, v21), plan, v21_bytes) is True
     with pytest.raises(ValueError, match="partial canonical authority"):
         _authority_exists(ScalarSequence(object(), v1, None), plan, v21_bytes)
+
+
+def test_stage_3_receipt_serializes_decimal_diagnostic_through_canonical_path():
+    def contains_decimal(value):
+        if isinstance(value, dict):
+            return any(contains_decimal(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains_decimal(item) for item in value)
+        return isinstance(value, Decimal)
+
+    diagnostic = {
+        "decision_count": 9454,
+        "eligible_candidate_decision_count": 9453,
+        "candidate_availability_percentage": Decimal("99.99"),
+        "scoring_effect": "NONE",
+        "live_capital_authorization": False,
+    }
+    expected_v21 = CorpusQualificationV21Manifest.model_construct(
+        qualification_manifest_id=UUID("2d74c24a-55bd-5dba-a646-899babc57fd1"),
+        qualification_manifest_sha256="9" * 64,
+        qualification_policy_version="CORPUS-QUALIFICATION-v2.1",
+        provider_code="THETA_DATA",
+        stage_2_predecessor={"receipt_sha256": "2" * 64},
+        v1_lineage={"qualification_policy_version": "CORPUS-QUALIFICATION-v1"},
+        pilot_window={"total_calendar_sessions": 61},
+        scored_acquisition_qualification={
+            "acquisition_envelope": {"combined": {"completeness_percentage": Decimal("41.58")}}
+        },
+        strategy_001_diagnostic=diagnostic,
+        overall_qualification_verdict=QualificationStatus.FAIL,
+        raw_artifacts_manifest_sha256="3" * 64,
+        normalized_dataset_manifest_sha256="4" * 64,
+    )
+    expected_v21_bytes = expected_v21.canonical_bytes()
+    receipt = Receipt(
+        receipt_version=RECEIPT_VERSION,
+        dataset=DATASET,
+        stage=3,
+        stage_version=AUTHORITY_STAGE_VERSION,
+        predecessor_sha256="5" * 64,
+        inputs=(),
+        outputs=(),
+        facts={
+            "dataset_manifest_sha256": "4" * 64,
+            "qualification": expected_v21.model_dump(mode="json"),
+            "qualification_v1_lineage": expected_v21.v1_lineage,
+            "qualification_manifest_bytes_sha256": hashlib.sha256(
+                expected_v21_bytes
+            ).hexdigest(),
+            "strategy_001_diagnostic": expected_v21.model_dump(mode="json")[
+                "strategy_001_diagnostic"
+            ],
+        },
+    )
+    store = MemoryStore()
+
+    seal_receipt(store, receipt)
+
+    content = store.read_bytes(receipt_path(3))
+    restored = Receipt.parse(content)
+    payload = json.loads(content)
+    serialized_diagnostic = payload["facts"]["strategy_001_diagnostic"]
+    assert restored == receipt
+    assert not contains_decimal(payload)
+    assert Decimal(serialized_diagnostic["candidate_availability_percentage"]) == Decimal(
+        "99.99"
+    )
+    assert payload["facts"]["qualification"]["overall_qualification_verdict"] == "FAIL"
+    assert serialized_diagnostic["scoring_effect"] == "NONE"
+    assert serialized_diagnostic["live_capital_authorization"] is False
 
 
 def test_restart_chain_fails_closed_on_gap_and_source_generation_drift(tmp_path):
