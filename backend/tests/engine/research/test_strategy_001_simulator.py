@@ -63,9 +63,8 @@ def _candidate(
     strike: str = "111",
     bid: str = "0.38",
     ask: str = "0.40",
-    volume: int = 10,
-    open_interest: int = 50,
-    is_weekly: bool = True,
+    volume: int | None = 10,
+    open_interest: int | None = 50,
 ) -> OptionCandidate:
     return OptionCandidate(
         instrument_id=instrument_id,
@@ -78,7 +77,6 @@ def _candidate(
         ask=ask,
         volume=volume,
         open_interest=open_interest,
-        is_weekly=is_weekly,
     )
 
 
@@ -130,7 +128,7 @@ def test_candidate_filtering_zero_dte_precedence_and_tie_breaking() -> None:
     signal = derive_signals(_bars())[0]
     candidates = (
         _candidate(instrument_id="NEXT-DATE", expiration=date(2024, 1, 3), ask="0.35", bid="0.34"),
-        _candidate(instrument_id="NON-WEEKLY", ask="0.35", bid="0.34", is_weekly=False),
+        _candidate(instrument_id="DTE-TOO-HIGH", expiration=date(2024, 1, 10), ask="0.35", bid="0.34"),
         _candidate(instrument_id="ASK-TOO-HIGH", ask="0.51", bid="0.49"),
         _candidate(instrument_id="ZERO-BID", ask="0.02", bid="0.00"),
         _candidate(instrument_id="WIDE", ask="0.40", bid="0.36"),

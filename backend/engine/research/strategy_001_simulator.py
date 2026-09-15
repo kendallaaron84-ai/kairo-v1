@@ -123,12 +123,11 @@ class OptionCandidate(BaseModel):
     observed_at: datetime
     expiration: date
     strike: Decimal = Field(gt=0)
-    right: str = Field(pattern=r"^CALL$")
+    right: str = Field(pattern=r"^(CALL|PUT)$")
     bid: Decimal = Field(ge=0)
     ask: Decimal = Field(gt=0)
-    volume: int = Field(ge=0)
-    open_interest: int = Field(ge=0)
-    is_weekly: bool
+    volume: int | None = Field(default=None, ge=0)
+    open_interest: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def valid_quote(self) -> "OptionCandidate":
@@ -412,7 +411,6 @@ def resolve_candidate(
         if item.underlying_symbol == signal.symbol
         and item.observed_at == signal.legal_execution_at
         and item.right == "CALL"
-        and item.is_weekly
     )
     session_date = signal.legal_execution_at.astimezone(EASTERN).date()
     expirations = sorted({
@@ -431,14 +429,17 @@ def resolve_candidate(
         and item.ask <= Decimal("0.50")
         and item.bid > Decimal("0.00")
         and item.ask - item.bid <= Decimal("0.03")
-        and (item.volume >= 10 or item.open_interest >= 50)
+        and (
+            (item.volume is not None and item.volume >= 10)
+            or (item.open_interest is not None and item.open_interest >= 50)
+        )
     ]
     if not eligible:
         return None
     return min(eligible, key=lambda item: (
         abs(item.ask - ENTRY_TARGET),
         item.ask - item.bid,
-        -item.open_interest,
+        -(item.open_interest if item.open_interest is not None else -1),
         item.instrument_id,
     ))
 
