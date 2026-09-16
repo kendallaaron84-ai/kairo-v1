@@ -26,8 +26,13 @@ from engine.data.dynamic_option_slicer import (
     CompletedUnderlyingBar,
     DynamicEnvelopeSlice,
     DynamicOptionEvidenceSlicer,
+    ProviderListedContract,
+    ProviderQuoteSnapshot,
 )
-from engine.data.thetadata_quote_provider import ThetaQuoteTransportError
+from engine.data.thetadata_quote_provider import (
+    ThetaContractQuoteWindow,
+    ThetaQuoteTransportError,
+)
 from engine.validation.dynamic_envelope_qualifier import ENVELOPE_SATISFIED
 from engine.validation.feed_loader import canonical_json_bytes
 
@@ -95,7 +100,7 @@ class UnderlyingSessionSource(Protocol):
 
 
 class QuoteProvider(Protocol):
-    def acquire_quotes(self, **kwargs: Any) -> Any: ...
+    def fetch_contract_window(self, **kwargs: Any) -> ThetaContractQuoteWindow: ...
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,116 @@ class _RetryingSplitProvider:
                 self._sleeper(RETRY_DELAYS_SECONDS[retry_number])
                 self.retries += 1
         raise AssertionError("unreachable")
+
+
+@dataclass(frozen=True)
+class _SessionContractKey:
+    symbol: str
+    expiration_date: date
+    strike: Decimal
+    right: str
+    session_date: date
+
+
+class _ExpectedDrivenSessionQuoteCache:
+    """Cache only contracts requested by Expected_t, scoped to one active cell."""
+
+    def __init__(self, provider: QuoteProvider) -> None:
+        self._provider = provider
+        self._windows: dict[_SessionContractKey, ThetaContractQuoteWindow] = {}
+        self.network_fetches = 0
+        self.fetch_latencies_seconds: list[float] = []
+
+    def acquire_quotes(
+        self,
+        *,
+        symbol: str,
+        completed_at: datetime,
+        expiration_date: date,
+        contracts: tuple[ProviderListedContract, ...],
+    ) -> ProviderQuoteSnapshot:
+        requested_symbol = symbol.strip().upper()
+        if not requested_symbol or completed_at.tzinfo is None:
+            raise ValueError("symbol and timezone-aware completed_at are required")
+        local_completed = completed_at.astimezone(NEW_YORK)
+        if local_completed.second or local_completed.microsecond:
+            raise ValueError("completed_at must identify an exact one-minute interval")
+        identities = [contract.contract_id for contract in contracts]
+        if len(set(identities)) != len(identities):
+            raise ValueError("requested contracts must have unique identities")
+
+        quotes = []
+        acquisition_succeeded = True
+        start_time = local_completed.time()
+        end_time = (local_completed + timedelta(seconds=59, microseconds=999_000)).time()
+        for contract in sorted(
+            contracts,
+            key=lambda item: (
+                item.expiration_date,
+                item.strike,
+                item.right,
+                item.contract_id,
+            ),
+        ):
+            if contract.expiration_date != expiration_date:
+                raise ValueError("requested contract expiration contradicts request")
+            key = _SessionContractKey(
+                symbol=requested_symbol,
+                expiration_date=expiration_date,
+                strike=contract.strike,
+                right=contract.right,
+                session_date=local_completed.date(),
+            )
+            window = self._windows.get(key)
+            if window is None:
+                session_start = datetime.combine(
+                    local_completed.date(), time(9, 31), NEW_YORK
+                )
+                session_end = datetime.combine(
+                    local_completed.date(), time(16, 0), NEW_YORK
+                )
+                started = clock.perf_counter()
+                window = self._provider.fetch_contract_window(
+                    symbol=requested_symbol,
+                    expiration_date=expiration_date,
+                    contract=contract,
+                    start_at=session_start,
+                    end_at=session_end,
+                )
+                self.fetch_latencies_seconds.append(clock.perf_counter() - started)
+                self.network_fetches += 1
+                self._windows[key] = window
+            matches = tuple(
+                quote
+                for quote in window.quotes
+                if start_time
+                <= quote.provider_timestamp.astimezone(NEW_YORK).time()
+                <= end_time
+            )
+            if len(matches) > 1:
+                raise ValueError("session cache contains duplicate minute evidence")
+            if not window.acquisition_succeeded or not matches:
+                acquisition_succeeded = False
+                continue
+            quote = matches[0]
+            if (
+                quote.contract_id != contract.contract_id
+                or quote.expiration_date != contract.expiration_date
+                or quote.strike != contract.strike
+                or quote.right != contract.right
+            ):
+                raise ValueError("session cache quote identity contradicts Expected_t")
+            quotes.append(quote)
+        return ProviderQuoteSnapshot(
+            symbol=requested_symbol,
+            expiration_date=expiration_date,
+            timestamp=completed_at,
+            acquisition_succeeded=acquisition_succeeded,
+            quotes=tuple(quotes),
+        )
+
+    def clear(self) -> None:
+        self._windows.clear()
 
 
 class Q1HistoricalRunner:
@@ -247,24 +362,28 @@ class Q1HistoricalRunner:
 
         definition_path = self.root / "definitions" / symbol / f"{symbol}_definition_{session}.dbn"
         listing = DatabentoListingProvider((definition_path,))
+        session_cache = _ExpectedDrivenSessionQuoteCache(self.quote_provider)
         provider = _RetryingSplitProvider(
-            listing, self.quote_provider, sleeper=self.sleeper
+            listing, session_cache, sleeper=self.sleeper
         )
         slicer = DynamicOptionEvidenceSlicer(provider)
         rows: list[dict[str, Any]] = []
         reason_counts: dict[str, int] = {}
         cell_satisfied = 0
-        for bar in sealed.bars:
-            slices = slicer.slice_bar(bar)
-            satisfied = bool(slices) and all(
-                item.qualification.status == ENVELOPE_SATISFIED for item in slices
-            )
-            budget.record(satisfied)
-            cell_satisfied += int(satisfied)
-            for item in slices:
-                for reason in item.qualification.reason_codes:
-                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
-            rows.append(_interval_row(bar, slices, satisfied))
+        try:
+            for bar in sealed.bars:
+                slices = slicer.slice_bar(bar)
+                satisfied = bool(slices) and all(
+                    item.qualification.status == ENVELOPE_SATISFIED for item in slices
+                )
+                budget.record(satisfied)
+                cell_satisfied += int(satisfied)
+                for item in slices:
+                    for reason in item.qualification.reason_codes:
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                rows.append(_interval_row(bar, slices, satisfied))
+        finally:
+            session_cache.clear()
 
         partition = self.root / "intervals" / f"symbol={symbol}" / f"date={session:%Y%m%d}" / "intervals.parquet"
         _write_parquet(partition, rows)

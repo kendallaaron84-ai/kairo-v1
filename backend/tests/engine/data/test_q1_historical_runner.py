@@ -4,15 +4,27 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import hashlib
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
 import pyarrow as pa
 import pytest
 
-from engine.data.dynamic_option_slicer import CompletedUnderlyingBar
+from engine.data.dynamic_option_slicer import (
+    CompletedUnderlyingBar,
+    DynamicOptionEvidenceSlicer,
+    ProviderExpirationListing,
+    ProviderListedContract,
+    ProviderListingSnapshot,
+)
+from engine.data.thetadata_quote_provider import (
+    ThetaDataHistoricalQuoteProvider,
+    ThetaQuoteIdentityError,
+)
 from engine.data import q1_historical_runner as runner
 
 
@@ -65,6 +77,113 @@ class SyntheticQuoteProvider:
                 raise value
             return value
         return SimpleNamespace(acquisition_succeeded=True, quotes=())
+
+
+class RowFrame:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.columns = list(_theta_row().keys())
+
+    def to_dicts(self) -> list[dict[str, Any]]:
+        return list(self._rows)
+
+
+class SessionFrameClient:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.calls: list[dict[str, Any]] = []
+
+    def option_history_quote(self, **kwargs: Any) -> RowFrame:
+        self.calls.append(kwargs)
+        start = kwargs["start_time"]
+        end = kwargs["end_time"]
+        selected = [
+            row
+            for row in self.rows
+            if row["symbol"] == kwargs["symbol"]
+            and row["expiration"] == kwargs["expiration"].isoformat()
+            and Decimal(str(row["strike"])) == Decimal(kwargs["strike"])
+            and row["right"].lower() == kwargs["right"]
+            and row["timestamp"].date() == kwargs["date"]
+            and start <= row["timestamp"].astimezone(NY).time() <= end
+        ]
+        return RowFrame(selected)
+
+    def option_list_contracts(self, **kwargs: Any) -> None:
+        raise AssertionError("contract discovery is prohibited")
+
+
+def _listed_contract(
+    *,
+    strike: str = "50",
+    right: str = "CALL",
+    expiration: date = date(2024, 1, 5),
+) -> ProviderListedContract:
+    return ProviderListedContract(
+        contract_id=f"TQQQ-{expiration:%Y%m%d}-{strike}-{right}",
+        expiration_date=expiration,
+        strike=Decimal(strike),
+        right=right,
+    )
+
+
+def _theta_row(
+    *,
+    timestamp: datetime = datetime(2024, 1, 2, 9, 31, tzinfo=NY),
+    strike: str = "50",
+    right: str = "CALL",
+    bid: Any = 1.0,
+    ask: Any = 1.05,
+    bid_size: Any = 3,
+    ask_size: Any = 4,
+) -> dict[str, Any]:
+    return {
+        "symbol": "TQQQ",
+        "expiration": "2024-01-05",
+        "strike": float(strike),
+        "right": right,
+        "timestamp": timestamp,
+        "bid": bid,
+        "ask": ask,
+        "bid_size": bid_size,
+        "ask_size": ask_size,
+        "bid_exchange": 10,
+        "ask_exchange": 11,
+        "bid_condition": 0,
+        "ask_condition": 0,
+    }
+
+
+def _quote_signature(snapshot) -> tuple[Any, ...]:
+    def raw(value: Any) -> Any:
+        return "NaN" if isinstance(value, float) and math.isnan(value) else value
+
+    return (
+        snapshot.symbol,
+        snapshot.expiration_date,
+        snapshot.timestamp,
+        snapshot.acquisition_succeeded,
+        tuple(
+            (
+                quote.contract_id,
+                quote.expiration_date,
+                quote.strike,
+                quote.right,
+                quote.bid,
+                quote.ask,
+                quote.provider_timestamp,
+                raw(quote.raw_bid),
+                raw(quote.raw_ask),
+                quote.bid_size,
+                quote.ask_size,
+                quote.bid_exchange,
+                quote.ask_exchange,
+                quote.bid_condition,
+                quote.ask_condition,
+            )
+            for quote in snapshot.quotes
+        ),
+    )
 
 
 class SyntheticSlicer:
@@ -359,6 +478,253 @@ def test_transient_transport_failure_retries_then_succeeds_with_exact_counter():
     assert quotes.calls == 3
     assert provider.retries == 2
     assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "rows,completed_at",
+    [
+        ([_theta_row(bid=1.00, ask=1.05, bid_size=7, ask_size=9)], datetime(2024, 1, 2, 9, 31, tzinfo=NY)),
+        ([_theta_row(bid=float("nan"), ask=float("nan"))], datetime(2024, 1, 2, 9, 31, tzinfo=NY)),
+        ([], datetime(2024, 1, 2, 9, 31, tzinfo=NY)),
+        ([_theta_row(bid=0.0, ask=0.01)], datetime(2024, 1, 2, 9, 31, tzinfo=NY)),
+        ([_theta_row(bid=1.20, ask=1.10)], datetime(2024, 1, 2, 9, 31, tzinfo=NY)),
+        ([_theta_row(timestamp=datetime(2024, 1, 2, 16, 0, tzinfo=NY))], datetime(2024, 1, 2, 16, 0, tzinfo=NY)),
+    ],
+    ids=("finite", "nan", "missing", "zero-bid", "inverted", "boundary"),
+)
+def test_session_cache_is_field_for_field_equivalent_to_per_minute_provider(
+    rows, completed_at
+):
+    contract = _listed_contract()
+    direct_client = SessionFrameClient(rows)
+    cache_client = SessionFrameClient(rows)
+    direct = ThetaDataHistoricalQuoteProvider(direct_client)
+    cached = runner._ExpectedDrivenSessionQuoteCache(
+        ThetaDataHistoricalQuoteProvider(cache_client)
+    )
+
+    expected = direct.acquire_quotes(
+        symbol="TQQQ",
+        completed_at=completed_at,
+        expiration_date=contract.expiration_date,
+        contracts=(contract,),
+    )
+    observed = cached.acquire_quotes(
+        symbol="TQQQ",
+        completed_at=completed_at,
+        expiration_date=contract.expiration_date,
+        contracts=(contract,),
+    )
+
+    assert _quote_signature(observed) == _quote_signature(expected)
+    assert cached.network_fetches == 1
+    assert len(cache_client.calls) == 1
+
+
+def test_session_cache_preserves_multiple_contracts_call_put_separation():
+    completed = datetime(2024, 1, 2, 9, 31, tzinfo=NY)
+    contracts = (
+        _listed_contract(right="CALL"),
+        _listed_contract(right="PUT"),
+        _listed_contract(strike="51", right="CALL"),
+    )
+    rows = [
+        _theta_row(right="CALL", bid=1.0, ask=1.1),
+        _theta_row(right="PUT", bid=2.0, ask=2.1),
+        _theta_row(strike="51", right="CALL", bid=0.5, ask=0.6),
+    ]
+    direct = ThetaDataHistoricalQuoteProvider(SessionFrameClient(rows))
+    cached = runner._ExpectedDrivenSessionQuoteCache(
+        ThetaDataHistoricalQuoteProvider(SessionFrameClient(rows))
+    )
+
+    expected = direct.acquire_quotes(
+        symbol="TQQQ",
+        completed_at=completed,
+        expiration_date=date(2024, 1, 5),
+        contracts=contracts,
+    )
+    observed = cached.acquire_quotes(
+        symbol="TQQQ",
+        completed_at=completed,
+        expiration_date=date(2024, 1, 5),
+        contracts=contracts,
+    )
+
+    assert _quote_signature(observed) == _quote_signature(expected)
+    assert cached.network_fetches == 3
+    assert {(quote.strike, quote.right) for quote in observed.quotes} == {
+        (Decimal("50"), "CALL"),
+        (Decimal("50"), "PUT"),
+        (Decimal("51"), "CALL"),
+    }
+
+
+def test_session_cache_reduces_390_minute_requests_to_one_network_fetch():
+    session_start = datetime(2024, 1, 2, 9, 31, tzinfo=NY)
+    rows = [
+        _theta_row(timestamp=session_start + timedelta(minutes=index))
+        for index in range(390)
+    ]
+    client = SessionFrameClient(rows)
+    cached = runner._ExpectedDrivenSessionQuoteCache(
+        ThetaDataHistoricalQuoteProvider(client)
+    )
+    contract = _listed_contract()
+
+    for index in range(390):
+        snapshot = cached.acquire_quotes(
+            symbol="TQQQ",
+            completed_at=session_start + timedelta(minutes=index),
+            expiration_date=contract.expiration_date,
+            contracts=(contract,),
+        )
+        assert len(snapshot.quotes) == 1
+
+    assert cached.network_fetches == 1
+    assert len(client.calls) == 1
+    assert client.calls[0]["start_time"] == time(9, 31)
+    assert client.calls[0]["end_time"] == time(16, 0, 59, 999_000)
+
+
+def test_session_cache_key_isolates_contract_and_adjacent_session_date():
+    day_one = datetime(2024, 1, 2, 9, 31, tzinfo=NY)
+    day_two = datetime(2024, 1, 3, 9, 31, tzinfo=NY)
+    rows = [
+        _theta_row(timestamp=day_one, right="CALL"),
+        _theta_row(timestamp=day_one, right="PUT"),
+        _theta_row(timestamp=day_one, strike="51"),
+        _theta_row(timestamp=day_two, right="CALL"),
+    ]
+    client = SessionFrameClient(rows)
+    cached = runner._ExpectedDrivenSessionQuoteCache(
+        ThetaDataHistoricalQuoteProvider(client)
+    )
+    call = _listed_contract(right="CALL")
+    put = _listed_contract(right="PUT")
+    other_strike = _listed_contract(strike="51")
+
+    for completed, contract in (
+        (day_one, call),
+        (day_one, put),
+        (day_one, other_strike),
+        (day_two, call),
+    ):
+        cached.acquire_quotes(
+            symbol="TQQQ",
+            completed_at=completed,
+            expiration_date=contract.expiration_date,
+            contracts=(contract,),
+        )
+
+    assert cached.network_fetches == 4
+    assert len(client.calls) == 4
+    cached.clear()
+    cached.acquire_quotes(
+        symbol="TQQQ",
+        completed_at=day_one,
+        expiration_date=call.expiration_date,
+        contracts=(call,),
+    )
+    assert cached.network_fetches == 5
+
+
+def test_runner_clears_session_cache_at_cell_boundary(
+    tmp_path, synthetic_components, monkeypatch
+):
+    source, quotes = synthetic_components
+    root = tmp_path / "scratch"
+    _prepare_definitions(root, symbols=("SQQQ",))
+    original = runner._ExpectedDrivenSessionQuoteCache
+    cleared: list[int] = []
+
+    class TrackingCache(original):
+        def clear(self):
+            super().clear()
+            cleared.append(len(self._windows))
+
+    monkeypatch.setattr(runner, "_ExpectedDrivenSessionQuoteCache", TrackingCache)
+
+    assert _build(root, source, quotes, symbols=("SQQQ",)).run(stop_after_cells=1) is None
+    assert cleared == [0]
+
+
+def test_session_cache_identity_contradiction_matches_per_minute_failure():
+    contradictory = [_theta_row(right="PUT")]
+
+    class ContradictingClient(SessionFrameClient):
+        def option_history_quote(self, **kwargs: Any) -> RowFrame:
+            self.calls.append(kwargs)
+            return RowFrame(contradictory)
+
+    contract = _listed_contract(right="CALL")
+    completed = datetime(2024, 1, 2, 9, 31, tzinfo=NY)
+    direct = ThetaDataHistoricalQuoteProvider(ContradictingClient(contradictory))
+    cached = runner._ExpectedDrivenSessionQuoteCache(
+        ThetaDataHistoricalQuoteProvider(ContradictingClient(contradictory))
+    )
+
+    for provider in (direct, cached):
+        with pytest.raises(ThetaQuoteIdentityError):
+            provider.acquire_quotes(
+                symbol="TQQQ",
+                completed_at=completed,
+                expiration_date=contract.expiration_date,
+                contracts=(contract,),
+            )
+
+
+def test_session_cache_preserves_downstream_qualification_input():
+    completed = datetime(2024, 1, 2, 9, 31, tzinfo=NY)
+    strikes = tuple(Decimal(value) for value in range(40, 61))
+    contracts = tuple(
+        _listed_contract(strike=format(strike, "f"), right=right)
+        for strike in strikes
+        for right in ("CALL", "PUT")
+    )
+    rows = [
+        _theta_row(strike=format(contract.strike, "f"), right=contract.right)
+        for contract in contracts
+    ]
+
+    class Listing:
+        def discover_listings(self, *, symbol, completed_at):
+            return ProviderListingSnapshot(
+                symbol=symbol,
+                timestamp=completed_at,
+                discovery_succeeded=True,
+                expirations=(
+                    ProviderExpirationListing(
+                        expiration_date=date(2024, 1, 5),
+                        strikes=strikes,
+                        contracts=contracts,
+                    ),
+                ),
+            )
+
+    class Combined:
+        def __init__(self, quotes):
+            self.quotes = quotes
+
+        def discover_listings(self, **kwargs):
+            return Listing().discover_listings(**kwargs)
+
+        def acquire_quotes(self, **kwargs):
+            return self.quotes.acquire_quotes(**kwargs)
+
+    bar = CompletedUnderlyingBar("TQQQ", completed, Decimal("50"))
+    direct_result = DynamicOptionEvidenceSlicer(
+        Combined(ThetaDataHistoricalQuoteProvider(SessionFrameClient(rows)))
+    ).slice_bar(bar)
+    cached_result = DynamicOptionEvidenceSlicer(
+        Combined(
+            runner._ExpectedDrivenSessionQuoteCache(
+                ThetaDataHistoricalQuoteProvider(SessionFrameClient(rows))
+            )
+        )
+    ).slice_bar(bar)
+
+    assert cached_result == direct_result
 
 
 @pytest.mark.parametrize("defect", ["missing", "duplicate", "out_of_order", "invalid"])
