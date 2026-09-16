@@ -13,8 +13,9 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import time as clock
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -32,6 +33,7 @@ from engine.validation.feed_loader import canonical_json_bytes
 
 
 POLICY_ID = "DYNAMIC-ACQUISITION-Q1-v1.0"
+CONTRACT_SHA256 = "63daa1246a32aeb1794d148bfca4c3076a46ada1b7dfcccc570a07e6be151ecd"
 CHECKPOINT_VERSION = "Q1-DYNAMIC-CHECKPOINT-v1"
 RECEIPT_VERSION = "Q1-DYNAMIC-CELL-RECEIPT-v1"
 PARQUET_SCHEMA_VERSION = "Q1-DYNAMIC-INTERVAL-PARQUET-v1"
@@ -67,7 +69,8 @@ class ResumeProvenanceError(RuntimeError):
     code = "RESUME_ABORTED_PROVENANCE_MISMATCH"
 
     def __init__(self, detail: str) -> None:
-        super().__init__(f"{self.code}: {detail}")
+        self.detail = detail
+        super().__init__(self.code)
 
 
 class IrrecoverableCompletenessError(RuntimeError):
@@ -161,6 +164,7 @@ class Q1HistoricalRunner:
         sessions: tuple[date, ...] = Q1_SESSIONS,
         symbols: tuple[str, ...] = Q1_SYMBOLS,
         sleeper: Callable[[float], None] = clock.sleep,
+        contract_path: str | Path | None = None,
     ) -> None:
         self.root = Path(scratch_root)
         self.underlying_source = underlying_source
@@ -168,6 +172,11 @@ class Q1HistoricalRunner:
         self.sessions = sessions
         self.symbols = tuple(symbol.upper() for symbol in symbols)
         self.sleeper = sleeper
+        self.contract_path = Path(contract_path) if contract_path else (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "q1-2024-dynamic-acquisition-contract-v1.0.md"
+        )
         if not sessions or len(set(sessions)) != len(sessions):
             raise ValueError("sessions must be non-empty and unique")
         if not self.symbols or len(set(self.symbols)) != len(self.symbols):
@@ -180,8 +189,13 @@ class Q1HistoricalRunner:
         return tuple((symbol, session) for session in self.sessions for symbol in self.symbols)
 
     def run(self, *, stop_after_cells: int | None = None) -> RunnerResult | None:
+        contract_sha256 = verify_contract_identity(self.contract_path)
+        runner_git_identity = current_runner_git_identity()
         self.root.mkdir(parents=True, exist_ok=True)
-        checkpoint = self._load_and_verify_checkpoint()
+        checkpoint = self._load_and_verify_checkpoint(
+            contract_sha256=contract_sha256,
+            runner_git_identity=runner_git_identity,
+        )
         completed = list(checkpoint["completed_cells"])
         budget = _FailureBudget(
             evaluated=int(checkpoint["cumulative_evaluated"]),
@@ -189,9 +203,20 @@ class Q1HistoricalRunner:
         )
         processed_now = 0
         for symbol, session in self.cells[len(completed) :]:
-            cell = self._process_cell(symbol, session, budget)
+            cell = self._process_cell(
+                symbol,
+                session,
+                budget,
+                contract_sha256=contract_sha256,
+                runner_git_identity=runner_git_identity,
+            )
             completed.append(cell)
-            self._write_checkpoint(completed, budget)
+            self._write_checkpoint(
+                completed,
+                budget,
+                contract_sha256=contract_sha256,
+                runner_git_identity=runner_git_identity,
+            )
             processed_now += 1
             if stop_after_cells is not None and processed_now >= stop_after_cells:
                 return None
@@ -206,7 +231,13 @@ class Q1HistoricalRunner:
         )
 
     def _process_cell(
-        self, symbol: str, session: date, budget: _FailureBudget
+        self,
+        symbol: str,
+        session: date,
+        budget: _FailureBudget,
+        *,
+        contract_sha256: str,
+        runner_git_identity: str,
     ) -> dict[str, Any]:
         sealed = self.underlying_source.load_session(symbol, session)
         source_digest, source_size = file_identity(sealed.source_path)
@@ -238,17 +269,20 @@ class Q1HistoricalRunner:
         partition = self.root / "intervals" / f"symbol={symbol}" / f"date={session:%Y%m%d}" / "intervals.parquet"
         _write_parquet(partition, rows)
         partition_sha, partition_size = file_identity(partition)
+        semantic_sha256 = semantic_partition_sha256(partition)
         definition_sha, definition_size = file_identity(definition_path)
         receipt_path = self.root / "receipts" / "daily" / f"receipt_{symbol}_{session:%Y-%m-%d}.json"
         receipt = {
             "receipt_version": RECEIPT_VERSION,
             "policy_id": POLICY_ID,
+            "contract_sha256": contract_sha256,
+            "runner_git_identity": runner_git_identity,
             "cell_id": f"{symbol}_{session:%Y-%m-%d}",
             "symbol": symbol,
             "session": session.isoformat(),
-            "underlying_source": {"path": str(sealed.source_path), "sha256": source_digest, "byte_count": source_size},
+            "underlying_source": {"path": str(sealed.source_path.resolve()), "sha256": source_digest, "byte_count": source_size},
             "definition_source": {"relative_path": definition_path.relative_to(self.root).as_posix(), "sha256": definition_sha, "byte_count": definition_size},
-            "partition": {"relative_path": partition.relative_to(self.root).as_posix(), "sha256": partition_sha, "byte_count": partition_size, "schema_version": PARQUET_SCHEMA_VERSION},
+            "partition": {"relative_path": partition.relative_to(self.root).as_posix(), "sha256": partition_sha, "semantic_sha256": semantic_sha256, "byte_count": partition_size, "schema_version": PARQUET_SCHEMA_VERSION},
             "interval_counts": {"evaluated": len(rows), "satisfied": cell_satisfied, "failed": len(rows) - cell_satisfied},
             "failure_reasons": dict(sorted(reason_counts.items())),
             "operational_counters": {"retries": provider.retries},
@@ -260,13 +294,20 @@ class Q1HistoricalRunner:
             "symbol": symbol,
             "session": session.isoformat(),
             "partition": {**receipt["partition"]},
+            "definition_source": {**receipt["definition_source"]},
+            "underlying_source": {**receipt["underlying_source"]},
             "receipt": {"relative_path": receipt_path.relative_to(self.root).as_posix(), "sha256": receipt_sha, "byte_count": receipt_size},
         }
 
-    def _load_and_verify_checkpoint(self) -> dict[str, Any]:
+    def _load_and_verify_checkpoint(
+        self,
+        *,
+        contract_sha256: str,
+        runner_git_identity: str,
+    ) -> dict[str, Any]:
         path = self.root / "state" / "checkpoint.json"
         if not path.exists():
-            return _empty_checkpoint()
+            return _empty_checkpoint(contract_sha256, runner_git_identity)
         try:
             checkpoint = json.loads(path.read_bytes())
         except (OSError, json.JSONDecodeError) as exc:
@@ -275,6 +316,10 @@ class Q1HistoricalRunner:
             raise ResumeProvenanceError("checkpoint version differs")
         if checkpoint.get("policy_id") != POLICY_ID:
             raise ResumeProvenanceError("checkpoint policy identity differs")
+        if checkpoint.get("contract_sha256") != contract_sha256:
+            raise ResumeProvenanceError("checkpoint contract identity differs")
+        if checkpoint.get("runner_git_identity") != runner_git_identity:
+            raise ResumeProvenanceError("checkpoint runner identity differs")
         completed = checkpoint.get("completed_cells")
         if not isinstance(completed, list):
             raise ResumeProvenanceError("completed cell ledger is invalid")
@@ -291,9 +336,17 @@ class Q1HistoricalRunner:
         ):
             raise ResumeProvenanceError("checkpoint summary contradicts cell ledger")
         for item in completed:
-            for name in ("partition", "receipt"):
+            for name in ("partition", "receipt", "definition_source"):
                 identity = item.get(name, {})
                 self._verify_local_identity(identity, name)
+            self._verify_external_identity(item.get("underlying_source", {}))
+            partition_path = self.root / Path(item["partition"]["relative_path"])
+            try:
+                semantic = semantic_partition_sha256(partition_path)
+            except Exception as exc:
+                raise ResumeProvenanceError("partition semantic decoding failed") from exc
+            if semantic != item["partition"].get("semantic_sha256"):
+                raise ResumeProvenanceError("partition semantic identity differs")
         evaluated = int(checkpoint.get("cumulative_evaluated", -1))
         satisfied = int(checkpoint.get("cumulative_satisfied", -1))
         failed = int(checkpoint.get("cumulative_failed", -1))
@@ -313,10 +366,29 @@ class Q1HistoricalRunner:
         except (KeyError, OSError, TypeError, ValueError) as exc:
             raise ResumeProvenanceError(f"{label} identity differs") from exc
 
-    def _write_checkpoint(self, completed: list[dict[str, Any]], budget: _FailureBudget) -> None:
+    @staticmethod
+    def _verify_external_identity(identity: dict[str, Any]) -> None:
+        try:
+            path = Path(identity["path"])
+            digest, size = file_identity(path)
+            if digest != identity["sha256"] or size != int(identity["byte_count"]):
+                raise ValueError
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise ResumeProvenanceError("underlying source identity differs") from exc
+
+    def _write_checkpoint(
+        self,
+        completed: list[dict[str, Any]],
+        budget: _FailureBudget,
+        *,
+        contract_sha256: str,
+        runner_git_identity: str,
+    ) -> None:
         payload = {
             "checkpoint_version": CHECKPOINT_VERSION,
             "policy_id": POLICY_ID,
+            "contract_sha256": contract_sha256,
+            "runner_git_identity": runner_git_identity,
             "last_completed_cell": completed[-1]["cell_id"] if completed else None,
             "completed_cells_count": len(completed),
             "cell_receipt_sha256": completed[-1]["receipt"]["sha256"] if completed else None,
@@ -328,10 +400,12 @@ class Q1HistoricalRunner:
         _atomic_json(self.root / "state" / "checkpoint.json", payload)
 
 
-def _empty_checkpoint() -> dict[str, Any]:
+def _empty_checkpoint(contract_sha256: str, runner_git_identity: str) -> dict[str, Any]:
     return {
         "checkpoint_version": CHECKPOINT_VERSION,
         "policy_id": POLICY_ID,
+        "contract_sha256": contract_sha256,
+        "runner_git_identity": runner_git_identity,
         "last_completed_cell": None,
         "completed_cells_count": 0,
         "cell_receipt_sha256": None,
@@ -340,6 +414,34 @@ def _empty_checkpoint() -> dict[str, Any]:
         "cumulative_satisfied": 0,
         "cumulative_failed": 0,
     }
+
+
+def verify_contract_identity(path: Path) -> str:
+    try:
+        digest, _ = file_identity(path)
+    except OSError as exc:
+        raise RuntimeError("HARD_STOP_CONTRACT_IDENTITY_MISMATCH") from exc
+    if digest != CONTRACT_SHA256:
+        raise RuntimeError("HARD_STOP_CONTRACT_IDENTITY_MISMATCH")
+    return digest
+
+
+def current_runner_git_identity() -> str:
+    repository = Path(__file__).resolve().parents[3]
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("HARD_STOP_RUNNER_GIT_IDENTITY_UNAVAILABLE") from exc
+    identity = completed.stdout.strip().lower()
+    if len(identity) != 40 or any(character not in "0123456789abcdef" for character in identity):
+        raise RuntimeError("HARD_STOP_RUNNER_GIT_IDENTITY_UNAVAILABLE")
+    return identity
 
 
 def _retryable(exc: Exception) -> bool:
@@ -428,6 +530,56 @@ def _write_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
     temporary.replace(path)
 
 
+def semantic_rows_sha256(rows: Iterable[dict[str, Any]]) -> str:
+    """Hash decoded interval meaning, independent of Parquet representation bytes."""
+
+    normalized = [_semantic_record(row) for row in rows]
+    normalized.sort(key=lambda row: row["completed_at"])
+    return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
+
+
+def semantic_partition_sha256(path: Path) -> str:
+    table = pq.ParquetFile(path).read()
+    if not table.schema.equals(INTERVAL_SCHEMA, check_metadata=True):
+        raise ValueError("partition schema does not match the frozen interval schema")
+    return semantic_rows_sha256(table.to_pylist())
+
+
+def _semantic_record(row: dict[str, Any]) -> dict[str, Any]:
+    completed_at = row["completed_at"]
+    if not isinstance(completed_at, datetime) or completed_at.tzinfo is None:
+        raise ValueError("semantic interval timestamp must be timezone-aware")
+    raw_evidence = row["evidence_json"]
+    if not isinstance(raw_evidence, bytes):
+        raise ValueError("semantic interval evidence must be encoded bytes")
+    evidence = json.loads(raw_evidence)
+    slices = evidence.get("slices")
+    if not isinstance(slices, list):
+        raise ValueError("semantic interval slices must be a list")
+    for item in slices:
+        contracts = item.get("contracts")
+        if not isinstance(contracts, list):
+            raise ValueError("semantic interval contracts must be a list")
+        contracts.sort(
+            key=lambda contract: (
+                Decimal(contract["strike"]),
+                contract["right"],
+                contract["contract_id"],
+            )
+        )
+    slices.sort(key=lambda item: item["expiration"] or "")
+    evidence["slices"] = slices
+    return {
+        "schema_version": row["schema_version"],
+        "symbol": row["symbol"],
+        "completed_at": completed_at.astimezone(timezone.utc).isoformat(),
+        "spot": row["spot"],
+        "status": row["status"],
+        "slice_count": int(row["slice_count"]),
+        "evidence": evidence,
+    }
+
+
 def _atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -449,8 +601,11 @@ def write_manifest(root: Path) -> tuple[Path, str]:
     root = Path(root)
     manifest = root / "MANIFEST.sha256"
     paths = sorted(
-        path for path in root.rglob("*")
-        if path.is_file() and path != manifest and not path.name.endswith(".tmp")
+        (
+            path for path in root.rglob("*")
+            if path.is_file() and path != manifest and not path.name.endswith(".tmp")
+        ),
+        key=lambda path: path.relative_to(root).as_posix(),
     )
     records = []
     for path in paths:
