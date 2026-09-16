@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import databento_dbn as dbn
 import pytest
+import zstandard
 
 from engine.data.databento_listing_provider import (
     DatabentoListedContract,
@@ -17,6 +19,7 @@ from engine.data.databento_listing_provider import (
 
 UTC = timezone.utc
 NEW_YORK = ZoneInfo("America/New_York")
+DefinitionSources = dict[str, tuple[Path, bytes]]
 
 
 def _definition(
@@ -54,6 +57,136 @@ def _write_fixture(path: Path, definitions: list[dict[str, object]]) -> bytes:
     return payload
 
 
+def _timestamp_ns(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return int(parsed.timestamp()) * 1_000_000_000 + parsed.microsecond * 1_000
+
+
+def _expiration_ns(value: str) -> int:
+    expiration = date.fromisoformat(value)
+    close = datetime.combine(expiration, time(21), tzinfo=UTC)
+    return int(close.timestamp()) * 1_000_000_000
+
+
+def _encode_dbn(definitions: list[dict[str, object]]) -> bytes:
+    instrument_classes = {
+        "C": dbn.InstrumentClass.CALL,
+        "P": dbn.InstrumentClass.PUT,
+    }
+    update_actions = {
+        "A": dbn.SecurityUpdateAction.ADD,
+        "M": dbn.SecurityUpdateAction.MODIFY,
+        "D": dbn.SecurityUpdateAction.DELETE,
+    }
+    records = []
+    for item in definitions:
+        event_timestamp = _timestamp_ns(str(item["ts_event"]))
+        activation = item.get("activation")
+        records.append(
+            dbn.InstrumentDefMsg(
+                publisher_id=int(item["publisher_id"]),
+                instrument_id=int(item["instrument_id"]),
+                ts_event=event_timestamp,
+                ts_recv=event_timestamp,
+                min_price_increment=1_000_000,
+                display_factor=dbn.FIXED_PRICE_SCALE,
+                raw_symbol=str(item["raw_symbol"]),
+                asset=str(item["underlying"]),
+                security_type="OPT",
+                instrument_class=instrument_classes[str(item["instrument_class"])],
+                security_update_action=update_actions[
+                    str(item["security_update_action"])
+                ],
+                expiration=_expiration_ns(str(item["expiration"])),
+                activation=(
+                    _timestamp_ns(str(activation))
+                    if activation is not None
+                    else dbn.UNDEF_TIMESTAMP
+                ),
+                strike_price=int(
+                    Decimal(str(item["strike_price"])) * dbn.FIXED_PRICE_SCALE
+                ),
+                underlying=str(item["underlying"]),
+            )
+        )
+    metadata = dbn.Metadata(
+        dataset="OPRA.PILLAR",
+        start=_timestamp_ns("2024-01-02T00:00:00Z"),
+        end=_timestamp_ns("2024-01-09T00:00:00Z"),
+        stype_in=dbn.SType.PARENT,
+        stype_out=dbn.SType.INSTRUMENT_ID,
+        schema=dbn.Schema.DEFINITION,
+        symbols=["TQQQ.OPT"],
+    )
+    return bytes(metadata) + b"".join(bytes(record) for record in records)
+
+
+@pytest.fixture
+def definition_sources(tmp_path: Path) -> DefinitionSources:
+    definitions = [
+        _definition(
+            instrument_id=101,
+            ts_event="2024-01-02T13:00:00Z",
+            raw_symbol="TQQQ  240105C00045000",
+            strike="45",
+        ),
+        _definition(
+            instrument_id=102,
+            ts_event="2024-01-02T13:00:01Z",
+            raw_symbol="TQQQ  240105P00045000",
+            strike="45",
+            instrument_class="P",
+        ),
+        _definition(
+            instrument_id=103,
+            ts_event="2024-01-02T13:00:02Z",
+            raw_symbol="TQQQ  240105C00047500",
+            strike="47.5",
+        ),
+        _definition(
+            instrument_id=104,
+            ts_event="2024-01-02T13:00:03Z",
+            raw_symbol="TQQQ  240105P00053000",
+            strike="53",
+            instrument_class="P",
+        ),
+        _definition(
+            instrument_id=201,
+            ts_event="2024-01-02T15:00:00Z",
+            raw_symbol="TQQQ  240105C00045000",
+            strike="45",
+            action="M",
+        ),
+        _definition(
+            instrument_id=105,
+            ts_event="2024-01-02T16:15:00Z",
+            raw_symbol="TQQQ  240105C00061250",
+            strike="61.25",
+        ),
+        _definition(
+            instrument_id=104,
+            ts_event="2024-01-02T17:00:00Z",
+            raw_symbol="TQQQ  240105P00053000",
+            strike="53",
+            instrument_class="P",
+            action="D",
+        ),
+    ]
+    jsonl_path = tmp_path / "definitions.jsonl"
+    dbn_path = tmp_path / "definitions.dbn"
+    zstd_path = tmp_path / "definitions.dbn.zst"
+    jsonl_bytes = _write_fixture(jsonl_path, definitions)
+    dbn_bytes = _encode_dbn(definitions)
+    zstd_bytes = zstandard.ZstdCompressor().compress(dbn_bytes)
+    dbn_path.write_bytes(dbn_bytes)
+    zstd_path.write_bytes(zstd_bytes)
+    return {
+        "jsonl": (jsonl_path, jsonl_bytes),
+        "dbn": (dbn_path, dbn_bytes),
+        "dbn_zst": (zstd_path, zstd_bytes),
+    }
+
+
 def _query(
     provider: DatabentoListingProvider,
     clock: str,
@@ -71,6 +204,90 @@ def _contracts(snapshot) -> tuple[DatabentoListedContract, ...]:
         contract
         for expiration in snapshot.expirations
         for contract in expiration.contracts
+    )
+
+
+def _providers(
+    definition_sources: DefinitionSources,
+) -> dict[str, DatabentoListingProvider]:
+    return {
+        representation: DatabentoListingProvider([path])
+        for representation, (path, _) in definition_sources.items()
+    }
+
+
+def test_dbn_and_jsonl_definition_replay_have_structural_parity(
+    definition_sources: DefinitionSources,
+) -> None:
+    providers = _providers(definition_sources)
+
+    for clock in ("09:30", "10:00", "11:15", "12:01"):
+        jsonl_snapshot = _query(providers["jsonl"], clock)
+        dbn_snapshot = _query(providers["dbn"], clock)
+
+        assert dbn_snapshot == jsonl_snapshot
+
+    final_snapshot = _query(providers["dbn"], "12:01")
+    assert final_snapshot.expirations[0].strikes == (
+        Decimal("45"),
+        Decimal("47.5"),
+        Decimal("61.25"),
+    )
+    assert {contract.right for contract in _contracts(final_snapshot)} == {
+        "CALL",
+        "PUT",
+    }
+    assert _contracts(_query(providers["dbn"], "10:00"))[0].provider_instrument_id == 201
+
+
+def test_dbn_zst_replay_matches_uncompressed_dbn(
+    definition_sources: DefinitionSources,
+) -> None:
+    providers = _providers(definition_sources)
+
+    for clock in ("09:30", "10:00", "11:14", "11:15", "12:01"):
+        assert _query(providers["dbn_zst"], clock) == _query(providers["dbn"], clock)
+
+
+def test_all_representations_share_point_in_time_activation_boundary(
+    definition_sources: DefinitionSources,
+) -> None:
+    providers = _providers(definition_sources)
+
+    before = {
+        representation: _query(provider, "11:14")
+        for representation, provider in providers.items()
+    }
+    at_activation = {
+        representation: _query(provider, "11:15")
+        for representation, provider in providers.items()
+    }
+
+    assert len(set(before.values())) == 1
+    assert len(set(at_activation.values())) == 1
+    assert Decimal("61.25") not in before["jsonl"].expirations[0].strikes
+    assert Decimal("61.25") in at_activation["jsonl"].expirations[0].strikes
+
+
+def test_source_digest_binds_each_physical_representation(
+    definition_sources: DefinitionSources,
+) -> None:
+    providers = _providers(definition_sources)
+
+    actual_digests = {
+        representation: provider.source_digests[0][1]
+        for representation, provider in providers.items()
+    }
+    expected_digests = {
+        representation: hashlib.sha256(raw_bytes).hexdigest()
+        for representation, (_, raw_bytes) in definition_sources.items()
+    }
+
+    assert actual_digests == expected_digests
+    assert len(set(actual_digests.values())) == 3
+    assert _query(providers["jsonl"], "11:15") == _query(providers["dbn"], "11:15")
+    assert _query(providers["dbn"], "11:15") == _query(
+        providers["dbn_zst"], "11:15"
     )
 
 
